@@ -3565,15 +3565,15 @@ use spawngate::docker::DockerManager;
 
 /// Check if Docker is available for testing
 /// Only runs on Linux since macOS and Windows Docker support in CI is inconsistent
+#[cfg(not(target_os = "linux"))]
 async fn docker_available() -> bool {
-    // Skip Docker tests on non-Linux platforms in CI
-    #[cfg(not(target_os = "linux"))]
-    {
-        eprintln!("Docker tests only run on Linux");
-        return false;
-    }
+    eprintln!("Docker tests only run on Linux");
+    false
+}
 
-    #[cfg(target_os = "linux")]
+/// Check if Docker is available for testing
+#[cfg(target_os = "linux")]
+async fn docker_available() -> bool {
     match DockerManager::new(None).await {
         Ok(_) => true,
         Err(e) => {
