@@ -164,6 +164,7 @@ impl ProxyServer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection<S>(
     stream: S,
     addr: SocketAddr,
@@ -203,6 +204,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     mut req: Request<Incoming>,
     process_manager: Arc<ProcessManager>,
@@ -216,8 +218,7 @@ async fn handle_request(
     // Handle ACME HTTP-01 challenges first (before HTTPS redirect)
     if let Some(ref challenges) = acme_challenges {
         let path = req.uri().path();
-        if path.starts_with(ACME_CHALLENGE_PREFIX) {
-            let token = &path[ACME_CHALLENGE_PREFIX.len()..];
+        if let Some(token) = path.strip_prefix(ACME_CHALLENGE_PREFIX) {
             if let Some(key_auth) = challenges.get(token).await {
                 debug!(token, "Responding to ACME HTTP-01 challenge");
                 return Ok(Response::builder()

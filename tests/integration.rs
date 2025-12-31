@@ -3251,7 +3251,7 @@ async fn test_backends_endpoint_with_running_backend() {
         format!("http://127.0.0.1:{}", admin_port),
     );
 
-    let defaults = BackendDefaults::default();
+    let _defaults = BackendDefaults::default();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start admin server
@@ -3599,7 +3599,7 @@ async fn test_docker_manager_connection() {
 
     let manager = DockerManager::new(None).await.unwrap();
     // If we got here, connection succeeded
-    assert!(manager.is_running("nonexistent-container-id").await == false);
+    assert!(!manager.is_running("nonexistent-container-id").await);
 }
 
 #[tokio::test]
@@ -4561,8 +4561,10 @@ async fn test_hot_reload_updates_defaults() {
     let mut configs = HashMap::new();
     configs.insert("app.local".to_string(), mock_backend_config(port));
 
-    let mut defaults = BackendDefaults::default();
-    defaults.idle_timeout_secs = 300;
+    let defaults = BackendDefaults {
+        idle_timeout_secs: 300,
+        ..Default::default()
+    };
 
     let manager = ProcessManager::new(
         configs.clone(),
@@ -4574,8 +4576,10 @@ async fn test_hot_reload_updates_defaults() {
     assert_eq!(manager.get_defaults().idle_timeout_secs, 300);
 
     // Reload with new defaults
-    let mut new_defaults = BackendDefaults::default();
-    new_defaults.idle_timeout_secs = 600;
+    let new_defaults = BackendDefaults {
+        idle_timeout_secs: 600,
+        ..Default::default()
+    };
 
     manager.apply_config(configs, new_defaults).await.unwrap();
 

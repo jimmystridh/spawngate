@@ -75,6 +75,12 @@ impl std::fmt::Debug for TlsAlpn01Resolver {
     }
 }
 
+impl Default for TlsAlpn01Resolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TlsAlpn01Resolver {
     pub fn new() -> Self {
         Self {
@@ -127,13 +133,16 @@ impl ResolvesServerCert for TlsAlpn01Resolver {
     }
 }
 
+/// Stored certificate with chain and private key
+type StoredCert = Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>;
+
 /// ACME certificate manager
 pub struct AcmeManager {
     config: AcmeConfig,
     cache_dir: PathBuf,
     http01_challenges: Http01Challenges,
     tls_alpn01_resolver: Arc<TlsAlpn01Resolver>,
-    current_cert: Arc<RwLock<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>>>,
+    current_cert: Arc<RwLock<StoredCert>>,
     cert_tx: watch::Sender<Option<Arc<CertifiedKey>>>,
     cert_rx: watch::Receiver<Option<Arc<CertifiedKey>>>,
 }
