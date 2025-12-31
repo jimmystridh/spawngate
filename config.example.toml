@@ -1,0 +1,114 @@
+# Spawngate Configuration
+#
+# This proxy spawns backend processes on-demand and shuts them down after idle timeout.
+# Backends can signal readiness via health endpoint polling or callback mechanism.
+
+[server]
+# Port to listen on for incoming HTTP traffic
+port = 80
+
+# Bind address (0.0.0.0 for all interfaces)
+bind = "0.0.0.0"
+
+# Port for the internal admin API (used for backend ready callbacks)
+admin_port = 9999
+
+# Connection pool settings
+# Maximum idle connections to keep per backend host
+pool_max_idle_per_host = 10
+
+# Idle connection timeout in seconds (connections idle longer than this are closed)
+pool_idle_timeout_secs = 90
+
+# PID file path (optional, written on startup and removed on shutdown)
+# pid_file = "/var/run/spawngate.pid"
+
+[defaults]
+# Default idle timeout in seconds (backend will be stopped after this period of inactivity)
+idle_timeout_secs = 600  # 10 minutes
+
+# Default startup timeout in seconds (how long to wait for backend to become healthy)
+startup_timeout_secs = 30
+
+# Default health check polling interval in milliseconds (during startup)
+health_check_interval_ms = 100
+
+# Default health endpoint path
+health_path = "/health"
+
+# Default grace period in seconds between SIGTERM and SIGKILL during shutdown
+# When stopping a backend, the proxy sends SIGTERM first and waits this long
+# before sending SIGKILL if the process hasn't exited
+shutdown_grace_period_secs = 10
+
+# Default drain timeout in seconds (time to wait for in-flight requests to complete)
+# When a backend is being stopped, the proxy waits for active requests to finish
+# before sending SIGTERM. New requests during this time are rejected with 503.
+drain_timeout_secs = 30
+
+# Default request timeout in seconds (max time to wait for backend response)
+# If a request takes longer than this, the proxy returns 504 Gateway Timeout
+request_timeout_secs = 30
+
+# Default health check interval for ready backends in milliseconds
+# After a backend becomes ready, health checks continue at this interval
+# to detect backends that become unhealthy
+ready_health_check_interval_ms = 5000  # 5 seconds
+
+# Number of consecutive health check failures before marking backend as unhealthy
+# When reached, the backend is automatically restarted
+unhealthy_threshold = 3
+
+# Example backend configurations
+# Each backend is keyed by hostname (the Host header value)
+
+[backends."example.com"]
+# Command to execute
+command = "node"
+
+# Arguments to pass to the command
+args = ["server.js"]
+
+# Working directory (optional)
+working_dir = "/var/www/example.com"
+
+# Port the backend will listen on
+port = 3000
+
+# Environment variables (optional)
+[backends."example.com".env]
+NODE_ENV = "production"
+
+[backends."api.example.com"]
+command = "python"
+args = ["-m", "http.server", "8000"]
+port = 8000
+
+# Override default idle timeout for this backend
+idle_timeout_secs = 300  # 5 minutes
+
+# Override health endpoint
+health_path = "/healthz"
+
+[backends."app.example.com"]
+command = "/opt/myapp/server"
+args = ["--port", "4000"]
+port = 4000
+working_dir = "/opt/myapp"
+startup_timeout_secs = 60  # This app takes longer to start
+
+# Graceful shutdown settings for this backend (overrides defaults)
+shutdown_grace_period_secs = 30  # Allow more time for graceful shutdown
+drain_timeout_secs = 60  # Wait longer for in-flight requests
+
+# Request timeout for this backend (overrides default)
+request_timeout_secs = 60  # Allow 60 seconds for slow API calls
+
+# Health monitoring for this backend
+ready_health_check_interval_ms = 10000  # Check health every 10 seconds
+unhealthy_threshold = 5  # Restart after 5 consecutive failures
+
+# Environment variables for this backend
+[backends."app.example.com".env]
+DATABASE_URL = "postgres://localhost/myapp"
+REDIS_URL = "redis://localhost:6379"

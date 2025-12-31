@@ -1,0 +1,39 @@
+# Demo configuration with 60s idle timeout
+
+[server]
+port = 8080         # HTTP port (set to 0 to disable)
+tls_port = 8443     # HTTPS port (set to 0 to disable)
+bind = "127.0.0.1"
+admin_port = 9999
+tls = true          # Enable HTTPS with auto-generated self-signed cert
+force_https = true  # Redirect all HTTP requests to HTTPS
+
+# ACME/Let's Encrypt automatic certificates (uncomment to use instead of self-signed)
+# [server.acme]
+# enabled = true
+# domains = ["example.com", "api.example.com"]
+# email = "admin@example.com"
+# cache_dir = "./acme_cache"
+# # Challenge type: "http-01" (default, port 80) or "tls-alpn-01" (port 443)
+# challenge_type = "http-01"
+# # Use staging for testing (comment out for production)
+# # directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+[defaults]
+idle_timeout_secs = 60
+startup_timeout_secs = 30
+health_check_interval_ms = 100
+shutdown_grace_period_secs = 5
+
+[backends.app1]
+command = "tests/mock_server/target/release/mock-server"
+port = 3001
+health_path = "/health"
+
+[backends.app2]
+command = "tests/mock_server/target/release/mock-server"
+port = 3002
+health_path = "/health"
+
+[backends.app2.env]
+STARTUP_DELAY_MS = "10000"

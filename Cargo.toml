@@ -1,0 +1,58 @@
+[package]
+name = "spawngate"
+version = "0.1.0"
+edition = "2021"
+description = "A serverless-style reverse proxy that spawns backends on demand"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "process", "signal"] }
+
+# HTTP server and client
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+
+# Configuration
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Utilities
+dashmap = "6"
+parking_lot = "0.12"
+serde_json = "1.0.148"
+uuid = { version = "1.19.0", features = ["v4"] }
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+rcgen = "0.13"
+
+# ACME/Let's Encrypt
+instant-acme = "0.7"
+futures = "0.3"
+base64 = "0.22"
+x509-parser = "0.16"
+
+# Docker API
+bollard = "0.18"
+
+# Unix-specific
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+sha1 = "0.10"
+base64 = "0.22"
+h2 = "0.4"
+http = "1"
+rustls-pemfile = "2"

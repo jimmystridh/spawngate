@@ -1,0 +1,13 @@
+[package]
+name = "mock-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mock-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros"] }
+sha1 = "0.10"
+base64 = "0.22"
