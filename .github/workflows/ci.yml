@@ -69,6 +69,10 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # Build the mock server used by integration tests
+      - name: Build mock server
+        run: cargo build --release --manifest-path tests/mock_server/Cargo.toml
+
       # --- TESTS: Regular tests on all platforms ---
       - name: Run regular tests
         run: cargo test --all --tests -- --nocapture
