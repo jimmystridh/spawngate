@@ -18,6 +18,9 @@ use tokio::sync::watch;
 /// Get the path to the mock server binary
 fn mock_server_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    #[cfg(windows)]
+    path.push("tests/mock_server/target/release/mock-server.exe");
+    #[cfg(not(windows))]
     path.push("tests/mock_server/target/release/mock-server");
     path
 }
@@ -728,6 +731,7 @@ async fn test_activity_resets_idle_timeout() {
 // ============================================================================
 
 #[tokio::test]
+#[cfg(unix)] // Uses Unix 'sleep' command
 async fn test_startup_timeout_stops_backend() {
     // Backend that will never become healthy (no server listening)
     let port = 30016;
@@ -3560,7 +3564,16 @@ async fn test_https_redirect_standard_port() {
 use spawngate::docker::DockerManager;
 
 /// Check if Docker is available for testing
+/// Only runs on Linux since macOS and Windows Docker support in CI is inconsistent
 async fn docker_available() -> bool {
+    // Skip Docker tests on non-Linux platforms in CI
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("Docker tests only run on Linux");
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
     match DockerManager::new(None).await {
         Ok(_) => true,
         Err(e) => {
