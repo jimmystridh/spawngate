@@ -583,28 +583,10 @@ impl Builder {
 
     /// Build using Cloud Native Buildpacks
     pub async fn build_buildpack(&self, config: &BuildConfig) -> Result<BuildResult> {
+        use crate::buildpacks::Buildpack;
+
         let start = std::time::Instant::now();
         let mut logs = Vec::new();
-
-        // Check if pack CLI is available
-        let pack_path = match &self.pack_path {
-            Some(path) => path,
-            None => {
-                return Ok(BuildResult {
-                    success: false,
-                    image: String::new(),
-                    duration_secs: start.elapsed().as_secs_f64(),
-                    logs,
-                    error: Some(
-                        "pack CLI not found. Install it with:\n\
-                         - macOS: brew install buildpacks/tap/pack\n\
-                         - Linux: curl -sSL 'https://github.com/buildpacks/pack/releases/download/v0.35.0/pack-v0.35.0-linux.tgz' | tar -xzf - -C /usr/local/bin\n\
-                         \nAlternatively, add a Dockerfile to your project for Docker builds."
-                            .to_string(),
-                    ),
-                });
-            }
-        };
 
         // Validate source path exists
         if !config.source_path.exists() {
@@ -620,140 +602,94 @@ impl Builder {
             });
         }
 
-        // Determine image name
-        let registry = config.registry.as_ref().or(self.default_registry.as_ref());
-        let image_name = if let Some(reg) = registry {
-            format!("{}/{}:{}", reg, config.app_name, config.tag)
-        } else {
-            format!("{}:{}", config.app_name, config.tag)
+        // Detect application type
+        logs.push("-----> Detecting application type...".to_string());
+        let detection = match Buildpack::detect(&config.source_path) {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(BuildResult {
+                    success: false,
+                    image: String::new(),
+                    duration_secs: start.elapsed().as_secs_f64(),
+                    logs,
+                    error: Some(format!("Failed to detect application: {}", e)),
+                });
+            }
         };
 
-        info!(
-            app = %config.app_name,
-            source = %config.source_path.display(),
-            builder = %config.builder,
-            image = %image_name,
-            "Building with Cloud Native Buildpacks"
-        );
+        logs.push(format!("-----> {} app detected", detection.language));
 
-        // Build the pack command
-        let mut cmd = Command::new(pack_path);
-        cmd.arg("build")
-            .arg(&image_name)
-            .arg("--path")
-            .arg(&config.source_path)
-            .arg("--builder")
-            .arg(if config.builder.is_empty() {
-                &self.default_builder
-            } else {
-                &config.builder
-            });
-
-        // Add buildpacks if specified
-        for bp in &config.buildpacks {
-            cmd.arg("--buildpack").arg(bp);
+        if let Some(version) = &detection.version {
+            logs.push(format!("       Version: {}", version));
         }
 
-        // Add build environment variables
-        for (key, value) in &config.build_env {
-            cmd.arg("--env").arg(format!("{}={}", key, value));
+        if let Some(framework) = detection.metadata.get("framework") {
+            logs.push(format!("       Framework: {}", framework));
         }
 
-        // Clear cache if requested
-        if config.clear_cache {
-            cmd.arg("--clear-cache");
+        if let Some(pm) = &detection.package_manager {
+            logs.push(format!("       Package manager: {}", pm));
         }
 
-        // Trust the builder
-        cmd.arg("--trust-builder");
-
-        // Set up for streaming output
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        debug!("Running: {:?}", cmd);
-
-        // Spawn the process
-        let mut child = cmd.spawn().context("Failed to spawn pack CLI")?;
-
-        // Stream stdout
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
-
-        // Collect output
-        loop {
-            tokio::select! {
-                line = stdout_reader.next_line() => {
-                    match line {
-                        Ok(Some(line)) => {
-                            info!(target: "builder", "{}", line);
-                            logs.push(line);
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            warn!("Error reading stdout: {}", e);
-                            break;
-                        }
-                    }
-                }
-                line = stderr_reader.next_line() => {
-                    match line {
-                        Ok(Some(line)) => {
-                            // Pack outputs to stderr too
-                            info!(target: "builder", "{}", line);
-                            logs.push(line);
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!("Error reading stderr: {}", e);
-                        }
-                    }
-                }
+        // Generate Dockerfile
+        logs.push("-----> Generating Dockerfile...".to_string());
+        let dockerfile_path = match Buildpack::write_dockerfile(&config.source_path, &detection) {
+            Ok(path) => path,
+            Err(e) => {
+                return Ok(BuildResult {
+                    success: false,
+                    image: String::new(),
+                    duration_secs: start.elapsed().as_secs_f64(),
+                    logs,
+                    error: Some(format!("Failed to generate Dockerfile: {}", e)),
+                });
             }
-        }
+        };
 
-        // Wait for process to complete
-        let status = child.wait().await.context("Failed to wait for pack CLI")?;
+        // Create a modified config that uses the generated Dockerfile
+        let dockerfile_config = BuildConfig {
+            app_name: config.app_name.clone(),
+            source_path: config.source_path.clone(),
+            build_mode: BuildMode::Dockerfile,
+            dockerfile: Some(dockerfile_path.file_name().unwrap().to_string_lossy().to_string()),
+            target: None,
+            build_args: config.build_args.clone(),
+            builder: config.builder.clone(),
+            buildpacks: config.buildpacks.clone(),
+            build_env: config.build_env.clone(),
+            registry: config.registry.clone(),
+            tag: config.tag.clone(),
+            clear_cache: config.clear_cache,
+            platform: config.platform.clone(),
+            image: config.image.clone(),
+        };
 
-        let duration = start.elapsed().as_secs_f64();
+        logs.push("-----> Building Docker image...".to_string());
 
-        if status.success() {
+        // Build using the generated Dockerfile
+        let mut result = self.build_dockerfile(&dockerfile_config).await?;
+
+        // Prepend our logs
+        let mut all_logs = logs;
+        all_logs.extend(result.logs);
+        result.logs = all_logs;
+
+        // Adjust duration to include detection time
+        result.duration_secs = start.elapsed().as_secs_f64();
+
+        // Clean up generated Dockerfile (optional, keep for debugging)
+        // let _ = std::fs::remove_file(&dockerfile_path);
+
+        if result.success {
             info!(
                 app = %config.app_name,
-                image = %image_name,
-                duration_secs = %duration,
-                "Build completed successfully"
+                language = %detection.language,
+                duration_secs = %result.duration_secs,
+                "Buildpack build completed successfully"
             );
-
-            Ok(BuildResult {
-                success: true,
-                image: image_name,
-                duration_secs: duration,
-                logs,
-                error: None,
-            })
-        } else {
-            let error_msg = format!(
-                "Build failed with exit code: {}",
-                status.code().unwrap_or(-1)
-            );
-            error!(
-                app = %config.app_name,
-                error = %error_msg,
-                "Build failed"
-            );
-
-            Ok(BuildResult {
-                success: false,
-                image: image_name,
-                duration_secs: duration,
-                logs,
-                error: Some(error_msg),
-            })
         }
+
+        Ok(result)
     }
 
     /// Build and push to registry

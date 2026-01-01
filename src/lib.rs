@@ -17,6 +17,7 @@ pub mod addons;
 pub mod admin;
 pub mod api;
 pub mod builder;
+pub mod buildpacks;
 pub mod config;
 pub mod dashboard;
 pub mod db;

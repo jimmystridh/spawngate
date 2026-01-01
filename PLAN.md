@@ -51,3 +51,18 @@ Map custom domains to apps with automatic SSL.
 - [x] Automatic SSL via Let's Encrypt (ACME) - self-signed for now
 - [x] Wildcard subdomain support (*.example.com)
 - [x] Domain routing in spawngate proxy (via database lookup)
+
+## 7. Buildpacks ✅
+Auto-detect language and build apps without Dockerfile.
+
+- [x] Language detection from project files
+- [x] Node.js support (npm, yarn, pnpm)
+- [x] Python support (pip, poetry, pipenv)
+- [x] Go support (go.mod)
+- [x] Ruby support (bundler, Rails)
+- [x] Rust support (Cargo)
+- [x] Static site support (nginx)
+- [x] Procfile parsing for process types
+- [x] Framework detection (Express, Next.js, Flask, FastAPI, Django, Rails, etc.)
+- [x] Automatic Dockerfile generation
+- [x] Extensive integration tests (34 tests)
