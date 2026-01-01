@@ -10,6 +10,7 @@ use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord};
 use crate::docker::DockerManager;
 use crate::dyno::{DynoConfig, DynoManager};
 use crate::git::{GitServer, GitServerConfig};
+use crate::loadbalancer::LoadBalancerManager;
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -209,9 +210,10 @@ impl PlatformApi {
         // Scan for existing repos
         git_server.scan_repos().await?;
 
-        // Initialize Docker and dyno manager
+        // Initialize Docker, load balancer, and dyno manager
         let docker = DockerManager::new(None).await?;
         let db_arc = Arc::new(db);
+        let load_balancer = Arc::new(LoadBalancerManager::default());
         let dyno_config = DynoConfig {
             network: config.network_name.clone(),
             health_check_url: Some(format!("http://{}", config.bind_addr)),
@@ -222,6 +224,7 @@ impl PlatformApi {
             Arc::new(docker),
             Arc::clone(&db_arc),
             dyno_config,
+            Arc::clone(&load_balancer),
         ).await?;
 
         Ok(Self {

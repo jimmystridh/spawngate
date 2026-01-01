@@ -4,6 +4,7 @@
 
 use crate::db::{Database, ProcessRecord};
 use crate::docker::DockerManager;
+use crate::loadbalancer::LoadBalancerManager;
 use anyhow::{Context, Result};
 use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
 use bollard::models::{HostConfig, PortBinding};
@@ -88,6 +89,8 @@ pub struct DynoManager {
     assigned_ports: RwLock<HashMap<String, u16>>,
     /// Next port to try assigning
     next_port: AtomicU16,
+    /// Load balancer manager for distributing requests
+    load_balancer: Arc<LoadBalancerManager>,
 }
 
 impl DynoManager {
@@ -96,6 +99,7 @@ impl DynoManager {
         docker: Arc<DockerManager>,
         db: Arc<Database>,
         config: DynoConfig,
+        load_balancer: Arc<LoadBalancerManager>,
     ) -> Result<Self> {
         Ok(Self {
             docker,
@@ -103,7 +107,13 @@ impl DynoManager {
             config,
             assigned_ports: RwLock::new(HashMap::new()),
             next_port: AtomicU16::new(PORT_RANGE_START),
+            load_balancer,
         })
+    }
+
+    /// Get the load balancer manager
+    pub fn load_balancer(&self) -> &Arc<LoadBalancerManager> {
+        &self.load_balancer
     }
 
     /// Scale an app to the specified number of dynos
@@ -299,6 +309,9 @@ impl DynoManager {
         };
         self.db.create_process(&process_record)?;
 
+        // Register with load balancer
+        self.load_balancer.add_backend(app_name, &dyno_id, host_port).await;
+
         Ok(Dyno {
             id: dyno_id,
             app_name: app_name.to_string(),
@@ -318,6 +331,11 @@ impl DynoManager {
         let proc = processes.iter()
             .find(|p| p.id == dyno_id)
             .ok_or_else(|| anyhow::anyhow!("Dyno not found: {}", dyno_id))?;
+
+        let app_name = proc.app_name.clone();
+
+        // Unregister from load balancer first (so new requests don't go to this dyno)
+        self.load_balancer.remove_backend(&app_name, dyno_id).await;
 
         if let Some(ref container_id) = proc.container_id {
             // Stop the container
