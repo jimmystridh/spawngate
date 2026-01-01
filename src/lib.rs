@@ -29,3 +29,4 @@ pub mod loadbalancer;
 pub mod pool;
 pub mod process;
 pub mod proxy;
+pub mod secrets;

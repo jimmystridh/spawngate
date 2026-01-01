@@ -115,6 +115,7 @@ enum Command {
     Scale(ScaleOptions),
     Ps(PsOptions),
     Restart(RestartOptions),
+    Secrets(SecretsCommand),
     Help,
     Version,
 }
@@ -164,6 +165,15 @@ enum ConfigCommand {
     List,
     ApiUrl { url: Option<String> },
     ApiToken { token: Option<String> },
+}
+
+#[derive(Debug)]
+enum SecretsCommand {
+    List,
+    Set { key: String, value: String },
+    Delete { key: String },
+    Audit,
+    Rotate,
 }
 
 #[derive(Debug)]
@@ -310,6 +320,7 @@ fn run() -> Result<()> {
         Command::Scale(opts) => handle_scale(opts)?,
         Command::Ps(opts) => handle_ps(opts)?,
         Command::Restart(opts) => handle_restart(opts)?,
+        Command::Secrets(cmd) => handle_secrets(cmd)?,
     }
 
     Ok(())
@@ -332,6 +343,7 @@ fn parse_command(args: &[String]) -> Command {
         "scale" => parse_scale_command(&args[1..]),
         "ps" | "processes" => parse_ps_command(&args[1..]),
         "restart" => parse_restart_command(&args[1..]),
+        "secrets" | "secret" => parse_secrets_command(&args[1..]),
         _ => {
             // Check if it's a shorthand
             if args[0].starts_with("apps:") {
@@ -341,6 +353,10 @@ fn parse_command(args: &[String]) -> Command {
             if args[0].starts_with("addons:") {
                 let sub = args[0].strip_prefix("addons:").unwrap();
                 return parse_addons_command(&[sub.to_string()].iter().chain(&args[1..]).cloned().collect::<Vec<_>>());
+            }
+            if args[0].starts_with("secrets:") {
+                let sub = args[0].strip_prefix("secrets:").unwrap();
+                return parse_secrets_command(&[sub.to_string()].iter().chain(&args[1..]).cloned().collect::<Vec<_>>());
             }
             Command::Help
         }
@@ -478,6 +494,28 @@ fn parse_ps_command(args: &[String]) -> Command {
 fn parse_restart_command(args: &[String]) -> Command {
     let app = args.get(0).filter(|s| !s.starts_with('-')).cloned();
     Command::Restart(RestartOptions { app })
+}
+
+fn parse_secrets_command(args: &[String]) -> Command {
+    if args.is_empty() {
+        return Command::Secrets(SecretsCommand::List);
+    }
+
+    match args[0].as_str() {
+        "list" | "ls" => Command::Secrets(SecretsCommand::List),
+        "set" | "add" => {
+            let key = args.get(1).cloned().unwrap_or_default();
+            let value = args.get(2).cloned().unwrap_or_default();
+            Command::Secrets(SecretsCommand::Set { key, value })
+        }
+        "delete" | "rm" | "remove" | "unset" => {
+            let key = args.get(1).cloned().unwrap_or_default();
+            Command::Secrets(SecretsCommand::Delete { key })
+        }
+        "audit" | "log" | "logs" => Command::Secrets(SecretsCommand::Audit),
+        "rotate" | "rotate-key" => Command::Secrets(SecretsCommand::Rotate),
+        _ => Command::Secrets(SecretsCommand::List),
+    }
 }
 
 fn handle_apps(cmd: AppsCommand) -> Result<()> {
@@ -1244,6 +1282,177 @@ fn handle_restart(opts: RestartOptions) -> Result<()> {
     Ok(())
 }
 
+/// Response type for secrets list
+#[derive(Debug, Deserialize)]
+struct SecretsListResponse {
+    app: String,
+    secrets: Vec<String>,
+    count: usize,
+}
+
+/// Response type for secrets set
+#[derive(Debug, Deserialize)]
+struct SecretsSetResponse {
+    app: String,
+    secrets_set: usize,
+}
+
+/// Audit log entry
+#[derive(Debug, Deserialize)]
+struct SecretAuditEntry {
+    id: i64,
+    app_name: String,
+    secret_key: String,
+    action: String,
+    actor: Option<String>,
+    #[allow(dead_code)]
+    ip_address: Option<String>,
+    created_at: String,
+}
+
+/// Key rotation response
+#[derive(Debug, Deserialize)]
+struct KeyRotationResponse {
+    old_key_id: String,
+    new_key_id: String,
+    secrets_re_encrypted: usize,
+}
+
+fn handle_secrets(cmd: SecretsCommand) -> Result<()> {
+    let client = ApiClient::new()?;
+    let current_app = get_current_app()?;
+
+    match cmd {
+        SecretsCommand::List => {
+            println!("Secrets for {}:", current_app);
+            println!();
+
+            let response = client.get(&format!("/apps/{}/secrets", current_app))?;
+            let result: ApiResponse<SecretsListResponse> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(data) = result.data {
+                    if data.secrets.is_empty() {
+                        println!("  No secrets configured.");
+                        println!();
+                        println!("Use 'paas secrets set <KEY> <VALUE>' to add a secret.");
+                    } else {
+                        for key in &data.secrets {
+                            println!("  {} = <encrypted>", key);
+                        }
+                        println!();
+                        println!("{} secret(s) configured", data.count);
+                    }
+                }
+            } else {
+                println!("Failed to list secrets: {}", result.error.unwrap_or_default());
+            }
+        }
+        SecretsCommand::Set { key, value } => {
+            if key.is_empty() || value.is_empty() {
+                println!("Usage: paas secrets set <KEY> <VALUE>");
+                println!();
+                println!("Example: paas secrets set DATABASE_PASSWORD mysecretpassword");
+                return Ok(());
+            }
+
+            let body = serde_json::json!({
+                "secrets": {
+                    key.clone(): value
+                }
+            });
+
+            let response = client.post(&format!("/apps/{}/secrets", current_app), &body.to_string())?;
+            let result: ApiResponse<SecretsSetResponse> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!("✓ Secret '{}' set for {}", key, current_app);
+                println!();
+                println!("The value is encrypted at rest.");
+                println!("Restart your app to apply the changes:");
+                println!("  paas restart");
+            } else {
+                println!("Failed to set secret: {}", result.error.unwrap_or_default());
+            }
+        }
+        SecretsCommand::Delete { key } => {
+            if key.is_empty() {
+                println!("Usage: paas secrets delete <KEY>");
+                return Ok(());
+            }
+
+            let response = client.delete(&format!("/apps/{}/secrets/{}", current_app, key))?;
+            let result: ApiResponse<()> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!("✓ Secret '{}' deleted from {}", key, current_app);
+                println!();
+                println!("Restart your app to apply the changes:");
+                println!("  paas restart");
+            } else {
+                println!("Failed to delete secret: {}", result.error.unwrap_or_default());
+            }
+        }
+        SecretsCommand::Audit => {
+            println!("Secrets audit log for {}:", current_app);
+            println!();
+
+            let response = client.get(&format!("/apps/{}/secrets/audit", current_app))?;
+            let result: ApiResponse<Vec<SecretAuditEntry>> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(entries) = result.data {
+                    if entries.is_empty() {
+                        println!("  No audit log entries.");
+                    } else {
+                        println!("  {:<20} {:<15} {:<10} {}", "Time", "Key", "Action", "Actor");
+                        println!("  {}", "-".repeat(60));
+                        for entry in entries {
+                            println!("  {:<20} {:<15} {:<10} {}",
+                                entry.created_at,
+                                entry.secret_key,
+                                entry.action,
+                                entry.actor.unwrap_or_else(|| "-".to_string())
+                            );
+                        }
+                    }
+                }
+            } else {
+                println!("Failed to fetch audit log: {}", result.error.unwrap_or_default());
+            }
+        }
+        SecretsCommand::Rotate => {
+            println!("Rotating encryption key...");
+            println!();
+            println!("WARNING: This will re-encrypt all secrets with a new key.");
+            println!("Press Ctrl+C to cancel or wait 3 seconds to continue...");
+            std::thread::sleep(std::time::Duration::from_secs(3));
+
+            let response = client.post("/secrets/rotate", "{}")?;
+            let result: ApiResponse<KeyRotationResponse> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(data) = result.data {
+                    println!("✓ Key rotation complete!");
+                    println!();
+                    println!("  Old key ID: {}...", &data.old_key_id[..8]);
+                    println!("  New key ID: {}...", &data.new_key_id[..8]);
+                    println!("  Secrets re-encrypted: {}", data.secrets_re_encrypted);
+                }
+            } else {
+                println!("Failed to rotate key: {}", result.error.unwrap_or_default());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(r#"
 paas - Your own Heroku (with Docker support)
@@ -1268,11 +1477,18 @@ COMMANDS:
 
     deploy [path]            Deploy application
     logs [app]               View application logs
+
     config list              List environment variables
     config set <key> <val>   Set environment variable
     config get <key>         Get environment variable
     config api-url [url]     Set/get API URL
     config api-token [token] Set/get API token
+
+    secrets list             List secret keys (values hidden)
+    secrets set <key> <val>  Set encrypted secret
+    secrets delete <key>     Delete a secret
+    secrets audit            View secrets audit log
+    secrets rotate           Rotate encryption key
 
 BUILD MODES (auto-detected):
     Dockerfile               docker build (highest priority)

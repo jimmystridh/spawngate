@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -91,6 +91,10 @@ impl Database {
 
             if current_version < 2 {
                 self.migrate_v2(&conn)?;
+            }
+
+            if current_version < 3 {
+                self.migrate_v3(&conn)?;
             }
         }
 
@@ -211,6 +215,43 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (2);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v3: Secrets audit log
+    fn migrate_v3(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v3: secrets audit log");
+
+        conn.execute_batch(r#"
+            -- Secrets audit log
+            CREATE TABLE IF NOT EXISTS secrets_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_name TEXT NOT NULL,
+                secret_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                actor TEXT,
+                ip_address TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Create indexes for audit log queries
+            CREATE INDEX IF NOT EXISTS idx_secrets_audit_app ON secrets_audit_log(app_name);
+            CREATE INDEX IF NOT EXISTS idx_secrets_audit_time ON secrets_audit_log(created_at);
+
+            -- Encryption keys table
+            CREATE TABLE IF NOT EXISTS encryption_keys (
+                id TEXT PRIMARY KEY,
+                key_data TEXT NOT NULL,
+                is_current INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                rotated_at TEXT
+            );
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (3);
         "#)?;
 
         Ok(())
@@ -698,6 +739,208 @@ impl Database {
         conn.execute("DELETE FROM app_processes WHERE app_name = ?1", params![app_name])?;
         Ok(())
     }
+
+    // ==================== Secrets Audit Log Operations ====================
+
+    /// Log a secret access event
+    pub fn log_secret_access(
+        &self,
+        app_name: &str,
+        secret_key: &str,
+        action: &str,
+        actor: Option<&str>,
+        ip_address: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO secrets_audit_log (app_name, secret_key, action, actor, ip_address)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![app_name, secret_key, action, actor, ip_address],
+        )?;
+        debug!(
+            app = app_name,
+            key = secret_key,
+            action = action,
+            "Secret access logged"
+        );
+        Ok(())
+    }
+
+    /// Get audit log for an app
+    pub fn get_secret_audit_log(&self, app_name: &str, limit: usize) -> Result<Vec<SecretAuditRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, secret_key, action, actor, ip_address, created_at
+             FROM secrets_audit_log WHERE app_name = ?1 ORDER BY created_at DESC LIMIT ?2"
+        )?;
+
+        let records = stmt.query_map(params![app_name, limit as i64], |row| {
+            Ok(SecretAuditRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                secret_key: row.get(2)?,
+                action: row.get(3)?,
+                actor: row.get(4)?,
+                ip_address: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Get all audit log entries (for admin)
+    pub fn get_all_secret_audit_log(&self, limit: usize) -> Result<Vec<SecretAuditRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, secret_key, action, actor, ip_address, created_at
+             FROM secrets_audit_log ORDER BY created_at DESC LIMIT ?1"
+        )?;
+
+        let records = stmt.query_map(params![limit as i64], |row| {
+            Ok(SecretAuditRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                secret_key: row.get(2)?,
+                action: row.get(3)?,
+                actor: row.get(4)?,
+                ip_address: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    // ==================== Encryption Key Operations ====================
+
+    /// Save an encryption key
+    pub fn save_encryption_key(&self, id: &str, key_data: &str, is_current: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // If this is the current key, unset any existing current key
+        if is_current {
+            conn.execute(
+                "UPDATE encryption_keys SET is_current = 0, rotated_at = datetime('now') WHERE is_current = 1",
+                [],
+            )?;
+        }
+
+        conn.execute(
+            "INSERT INTO encryption_keys (id, key_data, is_current)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET is_current = excluded.is_current",
+            params![id, key_data, is_current],
+        )?;
+
+        info!(key_id = id, is_current = is_current, "Encryption key saved");
+        Ok(())
+    }
+
+    /// Get the current encryption key
+    pub fn get_current_encryption_key(&self) -> Result<Option<EncryptionKeyRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, key_data, is_current, created_at, rotated_at
+             FROM encryption_keys WHERE is_current = 1",
+            [],
+            |row| {
+                Ok(EncryptionKeyRecord {
+                    id: row.get(0)?,
+                    key_data: row.get(1)?,
+                    is_current: row.get(2)?,
+                    created_at: row.get(3)?,
+                    rotated_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to get current encryption key")
+    }
+
+    /// Get all encryption keys (for rotation/decryption)
+    pub fn get_all_encryption_keys(&self) -> Result<Vec<EncryptionKeyRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, key_data, is_current, created_at, rotated_at
+             FROM encryption_keys ORDER BY created_at DESC"
+        )?;
+
+        let keys = stmt.query_map([], |row| {
+            Ok(EncryptionKeyRecord {
+                id: row.get(0)?,
+                key_data: row.get(1)?,
+                is_current: row.get(2)?,
+                created_at: row.get(3)?,
+                rotated_at: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(keys)
+    }
+
+    /// Delete old encryption keys (keep N most recent)
+    pub fn cleanup_old_encryption_keys(&self, keep_count: usize) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        // Get IDs to keep
+        let mut stmt = conn.prepare(
+            "SELECT id FROM encryption_keys ORDER BY created_at DESC LIMIT ?1"
+        )?;
+        let keep_ids: Vec<String> = stmt.query_map(params![keep_count as i64], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if keep_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Delete others
+        let placeholders: Vec<String> = keep_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "DELETE FROM encryption_keys WHERE id NOT IN ({})",
+            placeholders.join(",")
+        );
+
+        let params: Vec<&dyn rusqlite::ToSql> = keep_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let deleted = conn.execute(&sql, params.as_slice())?;
+
+        if deleted > 0 {
+            info!(deleted = deleted, kept = keep_count, "Cleaned up old encryption keys");
+        }
+
+        Ok(deleted)
+    }
+
+    // ==================== Secret Config Operations ====================
+
+    /// Get config entries marked as secrets
+    pub fn get_secret_keys(&self, app_name: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT key FROM app_config WHERE app_name = ?1 AND is_secret = 1"
+        )?;
+
+        let keys = stmt.query_map(params![app_name], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(keys)
+    }
+
+    /// Check if a config key is marked as secret
+    pub fn is_secret_key(&self, app_name: &str, key: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT is_secret FROM app_config WHERE app_name = ?1 AND key = ?2",
+            params![app_name, key],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map(|opt| opt.unwrap_or(false))
+        .context("Failed to check secret key")
+    }
 }
 
 // ==================== Record Types ====================
@@ -770,6 +1013,28 @@ pub struct DomainRecord {
     pub verified: bool,
     pub ssl_enabled: bool,
     pub created_at: String,
+}
+
+/// Secret audit log record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretAuditRecord {
+    pub id: i64,
+    pub app_name: String,
+    pub secret_key: String,
+    pub action: String,
+    pub actor: Option<String>,
+    pub ip_address: Option<String>,
+    pub created_at: String,
+}
+
+/// Encryption key record from database
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionKeyRecord {
+    pub id: String,
+    pub key_data: String,
+    pub is_current: bool,
+    pub created_at: String,
+    pub rotated_at: Option<String>,
 }
 
 #[cfg(test)]

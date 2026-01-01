@@ -12,6 +12,7 @@ use crate::dyno::{DynoConfig, DynoManager};
 use crate::git::{GitServer, GitServerConfig};
 use crate::healthcheck::{HealthCheckConfig, HealthChecker};
 use crate::loadbalancer::LoadBalancerManager;
+use crate::secrets::SecretsManager;
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -139,6 +140,19 @@ pub struct SetConfigRequest {
     pub env: HashMap<String, String>,
 }
 
+/// Request to set a secret
+#[derive(Debug, Deserialize)]
+pub struct SetSecretRequest {
+    pub key: String,
+    pub value: String,
+}
+
+/// Request to set multiple secrets
+#[derive(Debug, Deserialize)]
+pub struct SetSecretsRequest {
+    pub secrets: HashMap<String, String>,
+}
+
 /// API response wrapper
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {
@@ -176,6 +190,7 @@ pub struct PlatformApi {
     git_server: Arc<GitServer>,
     dyno_manager: Arc<DynoManager>,
     load_balancer: Arc<LoadBalancerManager>,
+    secrets_manager: Arc<tokio::sync::RwLock<SecretsManager>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -229,6 +244,19 @@ impl PlatformApi {
             Arc::clone(&load_balancer),
         ).await?;
 
+        // Initialize secrets manager
+        let secrets_key_path = config.data_dir.join("secrets.key");
+        let secrets_manager = if secrets_key_path.exists() {
+            SecretsManager::load_from_file(&secrets_key_path)
+                .context("Failed to load secrets key")?
+        } else {
+            let sm = SecretsManager::new();
+            sm.save_to_file(&secrets_key_path)
+                .context("Failed to save secrets key")?;
+            info!("Generated new secrets encryption key");
+            sm
+        };
+
         Ok(Self {
             config,
             db: db_arc,
@@ -237,6 +265,7 @@ impl PlatformApi {
             git_server: Arc::new(git_server),
             dyno_manager: Arc::new(dyno_manager),
             load_balancer,
+            secrets_manager: Arc::new(tokio::sync::RwLock::new(secrets_manager)),
             shutdown_rx,
         })
     }
@@ -447,6 +476,33 @@ impl PlatformApi {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/git")).unwrap_or("");
                 self.get_git_info(app_name).await
             }
+
+            // Secrets management
+            (Method::GET, path) if path.ends_with("/secrets") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/secrets")).unwrap_or("");
+                self.list_secrets(app_name).await
+            }
+            (Method::POST, path) if path.ends_with("/secrets") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/secrets")).unwrap_or("");
+                self.set_secrets(app_name, req).await
+            }
+            (Method::DELETE, path) if path.contains("/secrets/") => {
+                let parts: Vec<&str> = path.split('/').collect();
+                if parts.len() >= 5 {
+                    let app_name = parts[2];
+                    let secret_key = parts[4];
+                    self.delete_secret(app_name, secret_key).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
+            }
+            (Method::GET, path) if path.ends_with("/secrets/audit") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/secrets/audit")).unwrap_or("");
+                self.get_secrets_audit_log(app_name).await
+            }
+
+            // Key rotation
+            (Method::POST, "/secrets/rotate") => self.rotate_encryption_key().await,
 
             // Build trigger (for git hooks)
             (Method::POST, path) if path.starts_with("/build/") => {
@@ -1063,6 +1119,193 @@ impl PlatformApi {
                 ))
             }
         }
+    }
+
+    // ==================== Secrets Management ====================
+
+    async fn list_secrets(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Get list of secret keys (not values)
+        let secret_keys = self.db.get_secret_keys(app_name)?;
+
+        let result = serde_json::json!({
+            "app": app_name,
+            "secrets": secret_keys,
+            "count": secret_keys.len(),
+        });
+
+        let response = ApiResponse::ok(result);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn set_secrets(
+        self: Arc<Self>,
+        app_name: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let secrets_req: SetSecretsRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)));
+            }
+        };
+
+        let secrets_manager = self.secrets_manager.read().await;
+        let mut set_count = 0;
+
+        for (key, value) in secrets_req.secrets {
+            // Encrypt the secret value
+            let encrypted = match secrets_manager.encrypt(&value) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    error!(key = %key, error = %e, "Failed to encrypt secret");
+                    return Ok(json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to encrypt secret: {}", e),
+                    ));
+                }
+            };
+
+            // Store encrypted value with is_secret=true
+            self.db.set_config(app_name, &key, &encrypted, true)?;
+
+            // Log the access
+            self.db.log_secret_access(app_name, &key, "set", None, None)?;
+
+            info!(app = %app_name, key = %key, "Secret set");
+            set_count += 1;
+        }
+
+        let result = serde_json::json!({
+            "app": app_name,
+            "secrets_set": set_count,
+        });
+
+        let response = ApiResponse::ok(result);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn delete_secret(&self, app_name: &str, secret_key: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Check if secret exists and is marked as secret
+        if !self.db.is_secret_key(app_name, secret_key)? {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Secret not found"));
+        }
+
+        // Delete the secret
+        self.db.delete_config(app_name, secret_key)?;
+
+        // Log the deletion
+        self.db.log_secret_access(app_name, secret_key, "delete", None, None)?;
+
+        info!(app = %app_name, key = %secret_key, "Secret deleted");
+
+        let response: ApiResponse<()> = ApiResponse::ok(());
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_secrets_audit_log(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let audit_log = self.db.get_secret_audit_log(app_name, 100)?;
+
+        let response = ApiResponse::ok(audit_log);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn rotate_encryption_key(self: Arc<Self>) -> Result<Response<Full<Bytes>>> {
+        info!("Rotating encryption key");
+
+        let mut secrets_manager = self.secrets_manager.write().await;
+
+        // Get old key ID for logging
+        let old_key_id = secrets_manager.current_key_id().to_string();
+
+        // Rotate to new key
+        let new_key = secrets_manager.rotate_key();
+        let new_key_id = new_key.id().to_string();
+
+        // Save the key file
+        let key_path = self.config.data_dir.join("secrets.key");
+        secrets_manager.save_to_file(&key_path)?;
+
+        // Re-encrypt all secrets with new key
+        let apps = self.db.list_apps()?;
+        let mut re_encrypted_count = 0;
+
+        for app in apps {
+            let secret_keys = self.db.get_secret_keys(&app.name)?;
+
+            for key in secret_keys {
+                if let Some(encrypted_value) = self.db.get_config(&app.name, &key)? {
+                    if SecretsManager::is_encrypted(&encrypted_value) {
+                        match secrets_manager.re_encrypt(&encrypted_value) {
+                            Ok(new_encrypted) => {
+                                self.db.set_config(&app.name, &key, &new_encrypted, true)?;
+                                self.db.log_secret_access(&app.name, &key, "re-encrypt", None, None)?;
+                                re_encrypted_count += 1;
+                            }
+                            Err(e) => {
+                                warn!(app = %app.name, key = %key, error = %e, "Failed to re-encrypt secret");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!(
+            old_key_id = %old_key_id,
+            new_key_id = %new_key_id,
+            re_encrypted = re_encrypted_count,
+            "Key rotation complete"
+        );
+
+        let result = serde_json::json!({
+            "old_key_id": old_key_id,
+            "new_key_id": new_key_id,
+            "secrets_re_encrypted": re_encrypted_count,
+        });
+
+        let response = ApiResponse::ok(result);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    /// Get decrypted config for an app (for internal use when starting containers)
+    pub async fn get_decrypted_config(&self, app_name: &str) -> Result<HashMap<String, String>> {
+        let config = self.db.get_all_config(app_name)?;
+        let secrets_manager = self.secrets_manager.read().await;
+
+        let mut decrypted = HashMap::new();
+        for (key, value) in config {
+            let decrypted_value = if SecretsManager::is_encrypted(&value) {
+                // Log the access
+                self.db.log_secret_access(app_name, &key, "read", None, None)?;
+                secrets_manager.decrypt(&value)?
+            } else {
+                value
+            };
+            decrypted.insert(key, decrypted_value);
+        }
+
+        Ok(decrypted)
     }
 }
 

@@ -26,13 +26,13 @@ Run multiple instances of an app with load balancing.
 - [x] Health checks for each instance
 - [x] Rolling deploys
 
-## 4. Secrets Management
+## 4. Secrets Management ✅
 Encrypted environment variables.
 
-- [ ] Encrypt sensitive config vars at rest
-- [ ] Separate secrets from regular config
-- [ ] Key rotation support
-- [ ] Audit log for secret access
+- [x] Encrypt sensitive config vars at rest
+- [x] Separate secrets from regular config
+- [x] Key rotation support
+- [x] Audit log for secret access
 
 ## 5. Webhooks/CI Integration
 GitHub webhooks for auto-deploy on push.
