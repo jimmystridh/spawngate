@@ -34,14 +34,14 @@ Encrypted environment variables.
 - [x] Key rotation support
 - [x] Audit log for secret access
 
-## 5. Webhooks/CI Integration
+## 5. Webhooks/CI Integration ✅
 GitHub webhooks for auto-deploy on push.
 
-- [ ] Webhook endpoint for GitHub/GitLab
-- [ ] Verify webhook signatures
-- [ ] Auto-deploy on push to main branch
-- [ ] Deploy status notifications
-- [ ] Build status badges
+- [x] Webhook endpoint for GitHub/GitLab
+- [x] Verify webhook signatures (HMAC-SHA256)
+- [x] Auto-deploy on push to main branch
+- [x] Deploy status notifications
+- [x] Build status badges
 
 ## 6. Custom Domains
 Map custom domains to apps with automatic SSL.

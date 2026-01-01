@@ -48,6 +48,15 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 aes-gcm = "0.10"
 rand = "0.8"
 
+# Webhook signature verification
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# HTTP client for status notifications
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+urlencoding = "2.1"
+
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = "0.26"

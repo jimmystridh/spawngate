@@ -116,6 +116,7 @@ enum Command {
     Ps(PsOptions),
     Restart(RestartOptions),
     Secrets(SecretsCommand),
+    Webhooks(WebhooksCommand),
     Help,
     Version,
 }
@@ -174,6 +175,18 @@ enum SecretsCommand {
     Delete { key: String },
     Audit,
     Rotate,
+}
+
+#[derive(Debug)]
+enum WebhooksCommand {
+    Show,
+    Enable {
+        provider: Option<String>,
+        branch: Option<String>,
+        repo: Option<String>,
+    },
+    Disable,
+    Events,
 }
 
 #[derive(Debug)]
@@ -321,6 +334,7 @@ fn run() -> Result<()> {
         Command::Ps(opts) => handle_ps(opts)?,
         Command::Restart(opts) => handle_restart(opts)?,
         Command::Secrets(cmd) => handle_secrets(cmd)?,
+        Command::Webhooks(cmd) => handle_webhooks(cmd)?,
     }
 
     Ok(())
@@ -344,6 +358,7 @@ fn parse_command(args: &[String]) -> Command {
         "ps" | "processes" => parse_ps_command(&args[1..]),
         "restart" => parse_restart_command(&args[1..]),
         "secrets" | "secret" => parse_secrets_command(&args[1..]),
+        "webhooks" | "webhook" => parse_webhooks_command(&args[1..]),
         _ => {
             // Check if it's a shorthand
             if args[0].starts_with("apps:") {
@@ -357,6 +372,10 @@ fn parse_command(args: &[String]) -> Command {
             if args[0].starts_with("secrets:") {
                 let sub = args[0].strip_prefix("secrets:").unwrap();
                 return parse_secrets_command(&[sub.to_string()].iter().chain(&args[1..]).cloned().collect::<Vec<_>>());
+            }
+            if args[0].starts_with("webhooks:") {
+                let sub = args[0].strip_prefix("webhooks:").unwrap();
+                return parse_webhooks_command(&[sub.to_string()].iter().chain(&args[1..]).cloned().collect::<Vec<_>>());
             }
             Command::Help
         }
@@ -515,6 +534,45 @@ fn parse_secrets_command(args: &[String]) -> Command {
         "audit" | "log" | "logs" => Command::Secrets(SecretsCommand::Audit),
         "rotate" | "rotate-key" => Command::Secrets(SecretsCommand::Rotate),
         _ => Command::Secrets(SecretsCommand::List),
+    }
+}
+
+fn parse_webhooks_command(args: &[String]) -> Command {
+    if args.is_empty() {
+        return Command::Webhooks(WebhooksCommand::Show);
+    }
+
+    match args[0].as_str() {
+        "show" | "info" | "status" => Command::Webhooks(WebhooksCommand::Show),
+        "enable" | "create" | "add" => {
+            let mut provider = None;
+            let mut branch = None;
+            let mut repo = None;
+
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--provider" | "-p" => {
+                        provider = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--branch" | "-b" => {
+                        branch = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--repo" | "-r" => {
+                        repo = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+
+            Command::Webhooks(WebhooksCommand::Enable { provider, branch, repo })
+        }
+        "disable" | "delete" | "remove" => Command::Webhooks(WebhooksCommand::Disable),
+        "events" | "log" | "logs" | "history" => Command::Webhooks(WebhooksCommand::Events),
+        _ => Command::Webhooks(WebhooksCommand::Show),
     }
 }
 
@@ -1453,6 +1511,167 @@ fn handle_secrets(cmd: SecretsCommand) -> Result<()> {
     Ok(())
 }
 
+/// Response for webhook config
+#[derive(Debug, Deserialize)]
+struct WebhookConfigResponse {
+    enabled: bool,
+    provider: Option<String>,
+    deploy_branch: Option<String>,
+    auto_deploy: Option<bool>,
+    webhook_url: Option<String>,
+    has_status_token: Option<bool>,
+}
+
+/// Response for webhook creation
+#[derive(Debug, Deserialize)]
+struct WebhookCreateResponse {
+    webhook_url: String,
+    secret: String,
+    provider: String,
+    deploy_branch: String,
+}
+
+/// Webhook event
+#[derive(Debug, Deserialize)]
+struct WebhookEventResponse {
+    #[allow(dead_code)]
+    id: Option<i64>,
+    event_type: String,
+    provider: String,
+    branch: Option<String>,
+    commit_sha: Option<String>,
+    commit_message: Option<String>,
+    triggered_deploy: bool,
+    created_at: Option<String>,
+}
+
+fn handle_webhooks(cmd: WebhooksCommand) -> Result<()> {
+    let client = ApiClient::new()?;
+    let current_app = get_current_app()?;
+
+    match cmd {
+        WebhooksCommand::Show => {
+            println!("Webhook configuration for {}:", current_app);
+            println!();
+
+            let response = client.get(&format!("/apps/{}/webhook", current_app))?;
+            let result: ApiResponse<WebhookConfigResponse> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(config) = result.data {
+                    if config.enabled {
+                        println!("  Status:        Enabled ✓");
+                        println!("  Provider:      {}", config.provider.unwrap_or_default());
+                        println!("  Deploy branch: {}", config.deploy_branch.unwrap_or_default());
+                        println!("  Auto-deploy:   {}", if config.auto_deploy.unwrap_or(false) { "Yes" } else { "No" });
+                        println!("  Status token:  {}", if config.has_status_token.unwrap_or(false) { "Configured" } else { "Not set" });
+                        println!();
+                        println!("Webhook URL:");
+                        println!("  {}", config.webhook_url.unwrap_or_default());
+                        println!();
+                        println!("Add this URL to your GitHub/GitLab repository settings.");
+                    } else {
+                        println!("  Webhooks not configured.");
+                        println!();
+                        println!("Enable webhooks with:");
+                        println!("  paas webhooks enable");
+                    }
+                }
+            } else {
+                println!("Failed to fetch webhook config: {}", result.error.unwrap_or_default());
+            }
+        }
+        WebhooksCommand::Enable { provider, branch, repo } => {
+            println!("Enabling webhooks for {}...", current_app);
+            println!();
+
+            let body = serde_json::json!({
+                "provider": provider.unwrap_or_else(|| "github".to_string()),
+                "deploy_branch": branch.unwrap_or_else(|| "main".to_string()),
+                "auto_deploy": true,
+                "repo_name": repo,
+            });
+
+            let response = client.post(&format!("/apps/{}/webhook", current_app), &body.to_string())?;
+            let result: ApiResponse<WebhookCreateResponse> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(config) = result.data {
+                    println!("✓ Webhooks enabled!");
+                    println!();
+                    println!("Configuration:");
+                    println!("  Provider:      {}", config.provider);
+                    println!("  Deploy branch: {}", config.deploy_branch);
+                    println!();
+                    println!("Webhook URL:");
+                    println!("  {}", config.webhook_url);
+                    println!();
+                    println!("Webhook Secret (save this, shown only once):");
+                    println!("  {}", config.secret);
+                    println!();
+                    println!("Add the URL and secret to your repository settings.");
+                }
+            } else {
+                println!("Failed to enable webhooks: {}", result.error.unwrap_or_default());
+            }
+        }
+        WebhooksCommand::Disable => {
+            println!("Disabling webhooks for {}...", current_app);
+
+            let response = client.delete(&format!("/apps/{}/webhook", current_app))?;
+            let result: ApiResponse<()> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!("✓ Webhooks disabled");
+                println!();
+                println!("Remember to remove the webhook from your repository settings.");
+            } else {
+                println!("Failed to disable webhooks: {}", result.error.unwrap_or_default());
+            }
+        }
+        WebhooksCommand::Events => {
+            println!("Recent webhook events for {}:", current_app);
+            println!();
+
+            let response = client.get(&format!("/apps/{}/webhook/events", current_app))?;
+            let result: ApiResponse<Vec<WebhookEventResponse>> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(events) = result.data {
+                    if events.is_empty() {
+                        println!("  No webhook events yet.");
+                    } else {
+                        println!("  {:<20} {:<10} {:<12} {:<8} {}", "Time", "Provider", "Branch", "Deploy", "Commit");
+                        println!("  {}", "-".repeat(75));
+                        for event in events {
+                            let deploy_status = if event.triggered_deploy { "✓" } else { "-" };
+                            let commit = event.commit_sha
+                                .as_ref()
+                                .map(|s| &s[..7.min(s.len())])
+                                .unwrap_or("-");
+                            println!("  {:<20} {:<10} {:<12} {:<8} {}",
+                                event.created_at.as_deref().unwrap_or("-"),
+                                event.provider,
+                                event.branch.as_deref().unwrap_or("-"),
+                                deploy_status,
+                                commit,
+                            );
+                        }
+                    }
+                }
+            } else {
+                println!("Failed to fetch events: {}", result.error.unwrap_or_default());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(r#"
 paas - Your own Heroku (with Docker support)
@@ -1489,6 +1708,11 @@ COMMANDS:
     secrets delete <key>     Delete a secret
     secrets audit            View secrets audit log
     secrets rotate           Rotate encryption key
+
+    webhooks                 Show webhook configuration
+    webhooks enable          Enable GitHub/GitLab webhooks
+    webhooks disable         Disable webhooks
+    webhooks events          Show recent webhook events
 
 BUILD MODES (auto-detected):
     Dockerfile               docker build (highest priority)

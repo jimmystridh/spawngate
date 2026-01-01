@@ -6,13 +6,17 @@
 use crate::addons::{AddonConfig, AddonManager, AddonPlan, AddonType};
 use crate::builder::{BuildConfig, BuildMode, Builder};
 use crate::dashboard;
-use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord};
+use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord, WebhookRecord, WebhookEventRecord};
 use crate::docker::DockerManager;
 use crate::dyno::{DynoConfig, DynoManager};
 use crate::git::{GitServer, GitServerConfig};
 use crate::healthcheck::{HealthCheckConfig, HealthChecker};
 use crate::loadbalancer::LoadBalancerManager;
 use crate::secrets::SecretsManager;
+use crate::webhooks::{
+    DeployStatus, WebhookConfig, WebhookHandler, WebhookProvider,
+    generate_badge_svg, generate_webhook_secret, StatusNotifier,
+};
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -191,6 +195,8 @@ pub struct PlatformApi {
     dyno_manager: Arc<DynoManager>,
     load_balancer: Arc<LoadBalancerManager>,
     secrets_manager: Arc<tokio::sync::RwLock<SecretsManager>>,
+    webhook_handler: Arc<tokio::sync::RwLock<WebhookHandler>>,
+    status_notifier: Arc<StatusNotifier>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -257,6 +263,15 @@ impl PlatformApi {
             sm
         };
 
+        // Initialize webhook handler with existing configurations
+        let webhook_handler = WebhookHandler::new();
+
+        // Load existing webhook configs from database
+        // (Configs are loaded on-demand from the database)
+
+        // Initialize status notifier for CI updates
+        let status_notifier = StatusNotifier::new();
+
         Ok(Self {
             config,
             db: db_arc,
@@ -266,6 +281,8 @@ impl PlatformApi {
             dyno_manager: Arc::new(dyno_manager),
             load_balancer,
             secrets_manager: Arc::new(tokio::sync::RwLock::new(secrets_manager)),
+            webhook_handler: Arc::new(tokio::sync::RwLock::new(webhook_handler)),
+            status_notifier: Arc::new(status_notifier),
             shutdown_rx,
         })
     }
@@ -503,6 +520,36 @@ impl PlatformApi {
 
             // Key rotation
             (Method::POST, "/secrets/rotate") => self.rotate_encryption_key().await,
+
+            // Webhook management
+            (Method::GET, path) if path.ends_with("/webhook") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/webhook")).unwrap_or("");
+                self.get_webhook_config(app_name).await
+            }
+            (Method::POST, path) if path.ends_with("/webhook") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/webhook")).unwrap_or("");
+                self.create_webhook(app_name, req).await
+            }
+            (Method::DELETE, path) if path.ends_with("/webhook") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/webhook")).unwrap_or("");
+                self.delete_webhook(app_name).await
+            }
+            (Method::GET, path) if path.ends_with("/webhook/events") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/webhook/events")).unwrap_or("");
+                self.get_webhook_events(app_name).await
+            }
+
+            // Incoming webhooks (GitHub/GitLab)
+            (Method::POST, path) if path.starts_with("/webhooks/") => {
+                let app_name = path.strip_prefix("/webhooks/").unwrap_or("");
+                self.handle_incoming_webhook(app_name, req).await
+            }
+
+            // Build status badge
+            (Method::GET, path) if path.ends_with("/badge.svg") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/badge.svg")).unwrap_or("");
+                self.get_build_badge(app_name).await
+            }
 
             // Build trigger (for git hooks)
             (Method::POST, path) if path.starts_with("/build/") => {
@@ -1306,6 +1353,421 @@ impl PlatformApi {
         }
 
         Ok(decrypted)
+    }
+
+    // ==================== Webhook Management ====================
+
+    async fn get_webhook_config(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        match self.db.get_webhook(app_name)? {
+            Some(webhook) => {
+                // Don't expose the secret in the response, just show metadata
+                let result = serde_json::json!({
+                    "app": app_name,
+                    "enabled": true,
+                    "provider": webhook.provider,
+                    "deploy_branch": webhook.deploy_branch,
+                    "auto_deploy": webhook.auto_deploy,
+                    "repo_name": webhook.repo_name,
+                    "webhook_url": format!("{}/webhooks/{}", self.config.bind_addr, app_name),
+                    "has_status_token": webhook.status_token.is_some(),
+                    "created_at": webhook.created_at,
+                    "updated_at": webhook.updated_at,
+                });
+                let response = ApiResponse::ok(result);
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            None => {
+                let result = serde_json::json!({
+                    "app": app_name,
+                    "enabled": false,
+                });
+                let response = ApiResponse::ok(result);
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+        }
+    }
+
+    async fn create_webhook(
+        self: Arc<Self>,
+        app_name: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        #[derive(Deserialize)]
+        struct CreateWebhookRequest {
+            #[serde(default = "default_provider")]
+            provider: String,
+            #[serde(default = "default_branch")]
+            deploy_branch: String,
+            #[serde(default = "default_true")]
+            auto_deploy: bool,
+            status_token: Option<String>,
+            repo_name: Option<String>,
+        }
+
+        fn default_provider() -> String { "github".to_string() }
+        fn default_branch() -> String { "main".to_string() }
+        fn default_true() -> bool { true }
+
+        let body = req.collect().await?.to_bytes();
+        let webhook_req: CreateWebhookRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)));
+            }
+        };
+
+        // Generate a secret if one doesn't exist
+        let secret = generate_webhook_secret();
+
+        let webhook = WebhookRecord {
+            app_name: app_name.to_string(),
+            secret: secret.clone(),
+            provider: webhook_req.provider.clone(),
+            deploy_branch: webhook_req.deploy_branch.clone(),
+            auto_deploy: webhook_req.auto_deploy,
+            status_token: webhook_req.status_token,
+            repo_name: webhook_req.repo_name,
+            created_at: String::new(), // Will be set by DB
+            updated_at: String::new(),
+        };
+
+        self.db.save_webhook(&webhook)?;
+
+        // Register with webhook handler
+        let config = WebhookConfig {
+            secret: secret.clone(),
+            provider: webhook_req.provider.parse().unwrap_or(WebhookProvider::GitHub),
+            deploy_branch: webhook_req.deploy_branch,
+            auto_deploy: webhook_req.auto_deploy,
+            status_token: webhook.status_token.clone(),
+            repo_name: webhook.repo_name.clone(),
+        };
+
+        let mut handler = self.webhook_handler.write().await;
+        handler.register(app_name, config);
+
+        info!(app = %app_name, provider = %webhook.provider, "Webhook created");
+
+        let result = serde_json::json!({
+            "app": app_name,
+            "webhook_url": format!("{}/webhooks/{}", self.config.bind_addr, app_name),
+            "secret": secret,  // Only show secret on creation
+            "provider": webhook.provider,
+            "deploy_branch": webhook.deploy_branch,
+            "auto_deploy": webhook.auto_deploy,
+        });
+
+        let response = ApiResponse::ok(result);
+        Ok(json_response(StatusCode::CREATED, serde_json::to_string(&response)?))
+    }
+
+    async fn delete_webhook(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let deleted = self.db.delete_webhook(app_name)?;
+
+        if deleted {
+            // Unregister from handler
+            let mut handler = self.webhook_handler.write().await;
+            handler.unregister(app_name);
+
+            info!(app = %app_name, "Webhook deleted");
+            let response: ApiResponse<()> = ApiResponse::ok(());
+            Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+        } else {
+            Ok(json_error(StatusCode::NOT_FOUND, "Webhook not found"))
+        }
+    }
+
+    async fn get_webhook_events(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let events = self.db.get_webhook_events(app_name, 50)?;
+        let response = ApiResponse::ok(events);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn handle_incoming_webhook(
+        self: Arc<Self>,
+        app_name: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        // Get webhook config from database
+        let webhook_config = match self.db.get_webhook(app_name)? {
+            Some(w) => w,
+            None => {
+                warn!(app = %app_name, "Webhook received for app without webhook config");
+                return Ok(json_error(StatusCode::NOT_FOUND, "Webhook not configured for this app"));
+            }
+        };
+
+        // Extract headers for signature verification
+        let signature = req.headers()
+            .get("X-Hub-Signature-256")
+            .or_else(|| req.headers().get("X-Hub-Signature"))
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        let gitlab_token = req.headers()
+            .get("X-Gitlab-Token")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        let event_type = req.headers()
+            .get("X-GitHub-Event")
+            .or_else(|| req.headers().get("X-Gitlab-Event"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("push")
+            .to_string();
+
+        // Read body
+        let body = req.collect().await?.to_bytes();
+        let payload = body.to_vec();
+
+        // Register config with handler for verification
+        let config = WebhookConfig {
+            secret: webhook_config.secret.clone(),
+            provider: webhook_config.provider.parse().unwrap_or(WebhookProvider::GitHub),
+            deploy_branch: webhook_config.deploy_branch.clone(),
+            auto_deploy: webhook_config.auto_deploy,
+            status_token: webhook_config.status_token.clone(),
+            repo_name: webhook_config.repo_name.clone(),
+        };
+
+        let mut handler = self.webhook_handler.write().await;
+        handler.register(app_name, config.clone());
+
+        // Verify signature
+        let provider: WebhookProvider = webhook_config.provider.parse().unwrap_or(WebhookProvider::GitHub);
+
+        let verified = match provider {
+            WebhookProvider::GitHub => {
+                if let Some(sig) = &signature {
+                    handler.verify_github_signature(app_name, &payload, sig)
+                } else {
+                    warn!(app = %app_name, "GitHub webhook missing signature");
+                    false
+                }
+            }
+            WebhookProvider::GitLab => {
+                if let Some(token) = &gitlab_token {
+                    handler.verify_gitlab_token(app_name, token)
+                } else {
+                    warn!(app = %app_name, "GitLab webhook missing token");
+                    false
+                }
+            }
+            _ => true, // Generic webhooks don't verify
+        };
+
+        if !verified {
+            return Ok(json_error(StatusCode::UNAUTHORIZED, "Invalid webhook signature"));
+        }
+
+        // Parse the event
+        let event = match provider {
+            WebhookProvider::GitHub => handler.parse_github_push(app_name, &payload),
+            WebhookProvider::GitLab => handler.parse_gitlab_push(app_name, &payload),
+            _ => handler.parse_generic_push(app_name, &payload),
+        };
+
+        drop(handler); // Release the lock
+
+        let event = match event {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(app = %app_name, error = %e, "Failed to parse webhook payload");
+                return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid payload: {}", e)));
+            }
+        };
+
+        info!(
+            app = %app_name,
+            branch = %event.branch,
+            commit = %event.commit_sha,
+            should_deploy = event.should_deploy,
+            "Webhook received"
+        );
+
+        // Log the event
+        let event_record = WebhookEventRecord {
+            id: None,
+            app_name: app_name.to_string(),
+            event_type: event_type.clone(),
+            provider: provider.to_string(),
+            branch: Some(event.branch.clone()),
+            commit_sha: Some(event.commit_sha.clone()),
+            commit_message: event.commit_message.clone(),
+            author: event.author.clone(),
+            payload: Some(String::from_utf8_lossy(&payload).to_string()),
+            triggered_deploy: event.should_deploy,
+            deployment_id: None,
+            created_at: None,
+        };
+        self.db.log_webhook_event(&event_record)?;
+
+        // Trigger deploy if configured
+        if event.should_deploy {
+            // Update build status to pending
+            self.db.update_build_status(app_name, "pending", Some(&event.commit_sha))?;
+
+            // Send pending status to GitHub/GitLab
+            if let Some(token) = &config.status_token {
+                if let Some(repo) = &config.repo_name {
+                    let _ = self.status_notifier.notify_github(
+                        token,
+                        repo,
+                        &event.commit_sha,
+                        DeployStatus::Pending,
+                        "Deployment queued",
+                        None,
+                    ).await;
+                }
+            }
+
+            info!(app = %app_name, commit = %event.commit_sha, "Triggering deploy from webhook");
+
+            // Trigger the build asynchronously
+            let self_clone = Arc::clone(&self);
+            let app_name_owned = app_name.to_string();
+            let commit_sha = event.commit_sha.clone();
+
+            tokio::spawn(async move {
+                // Update status to building
+                let _ = self_clone.db.update_build_status(&app_name_owned, "building", Some(&commit_sha));
+
+                // Trigger build
+                match self_clone.trigger_build_internal(&app_name_owned).await {
+                    Ok(_) => {
+                        let _ = self_clone.db.update_build_status(&app_name_owned, "success", Some(&commit_sha));
+                        info!(app = %app_name_owned, "Webhook deploy succeeded");
+                    }
+                    Err(e) => {
+                        let _ = self_clone.db.update_build_status(&app_name_owned, "failure", Some(&commit_sha));
+                        error!(app = %app_name_owned, error = %e, "Webhook deploy failed");
+                    }
+                }
+            });
+
+            let result = serde_json::json!({
+                "status": "accepted",
+                "message": "Deployment triggered",
+                "branch": event.branch,
+                "commit": event.commit_sha,
+            });
+            let response = ApiResponse::ok(result);
+            Ok(json_response(StatusCode::ACCEPTED, serde_json::to_string(&response)?))
+        } else {
+            let result = serde_json::json!({
+                "status": "ignored",
+                "message": format!("Branch '{}' is not the deploy branch ('{}')", event.branch, config.deploy_branch),
+                "branch": event.branch,
+                "commit": event.commit_sha,
+            });
+            let response = ApiResponse::ok(result);
+            Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+        }
+    }
+
+    async fn trigger_build_internal(&self, app_name: &str) -> Result<()> {
+        // Similar to trigger_build but returns Result instead of Response
+        let _app = self.db.get_app(app_name)?
+            .ok_or_else(|| anyhow::anyhow!("App not found"))?;
+
+        let repo = self.git_server.get_app(app_name).await
+            .ok_or_else(|| anyhow::anyhow!("Git repo not found"))?;
+
+        let build_config = BuildConfig {
+            app_name: app_name.to_string(),
+            source_path: repo.repo_path.clone(),
+            build_mode: BuildMode::Auto,
+            dockerfile: None,
+            target: None,
+            build_args: HashMap::new(),
+            builder: "paketobuildpacks/builder:base".to_string(),
+            buildpacks: vec![],
+            build_env: self.db.get_all_config(app_name)?,
+            registry: None,
+            tag: "latest".to_string(),
+            clear_cache: false,
+            platform: None,
+            image: None,
+        };
+
+        let result = self.builder.build(&build_config).await?;
+
+        if result.success {
+            // Update app with new image
+            self.db.update_app_deployment(
+                app_name,
+                &result.image,
+                repo.current_commit.as_deref(),
+            )?;
+
+            // Record deployment
+            let deploy_id = uuid::Uuid::new_v4().to_string();
+            let deployment = DeploymentRecord {
+                id: deploy_id,
+                app_name: app_name.to_string(),
+                status: "success".to_string(),
+                image: Some(result.image.clone()),
+                commit_hash: repo.current_commit.clone(),
+                build_logs: Some(result.logs.join("\n")),
+                duration_secs: Some(result.duration_secs),
+                created_at: String::new(), // Will be set by DB
+                finished_at: None,
+            };
+            self.db.create_deployment(&deployment)?;
+
+            // Restart the app if it's running
+            let _ = self.dyno_manager.rolling_restart(app_name, Some(&result.image)).await;
+        } else {
+            anyhow::bail!("Build failed: {}", result.error.unwrap_or_default());
+        }
+
+        Ok(())
+    }
+
+    async fn get_build_badge(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let status = self.db.get_build_status(app_name)?
+            .map(|s| match s.status.as_str() {
+                "success" => DeployStatus::Success,
+                "failure" | "failed" => DeployStatus::Failure,
+                "pending" => DeployStatus::Pending,
+                "building" => DeployStatus::Building,
+                _ => DeployStatus::Error,
+            })
+            .unwrap_or(DeployStatus::Error);
+
+        let svg = generate_badge_svg(status, app_name);
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "image/svg+xml")
+            .header("Cache-Control", "no-cache")
+            .body(Full::new(svg.into()))
+            .expect("valid response"))
     }
 }
 

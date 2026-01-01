@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -95,6 +95,10 @@ impl Database {
 
             if current_version < 3 {
                 self.migrate_v3(&conn)?;
+            }
+
+            if current_version < 4 {
+                self.migrate_v4(&conn)?;
             }
         }
 
@@ -252,6 +256,62 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (3);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v4: Webhooks and CI integration
+    fn migrate_v4(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v4: webhooks");
+
+        conn.execute_batch(r#"
+            -- Webhook configurations
+            CREATE TABLE IF NOT EXISTS webhooks (
+                app_name TEXT PRIMARY KEY,
+                secret TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'github',
+                deploy_branch TEXT NOT NULL DEFAULT 'main',
+                auto_deploy INTEGER NOT NULL DEFAULT 1,
+                status_token TEXT,
+                repo_name TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Webhook events log
+            CREATE TABLE IF NOT EXISTS webhook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_name TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                branch TEXT,
+                commit_sha TEXT,
+                commit_message TEXT,
+                author TEXT,
+                payload TEXT,
+                triggered_deploy INTEGER NOT NULL DEFAULT 0,
+                deployment_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Build status for badges
+            CREATE TABLE IF NOT EXISTS build_status (
+                app_name TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'unknown',
+                commit_sha TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Create indexes
+            CREATE INDEX IF NOT EXISTS idx_webhook_events_app ON webhook_events(app_name);
+            CREATE INDEX IF NOT EXISTS idx_webhook_events_time ON webhook_events(created_at);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (4);
         "#)?;
 
         Ok(())
@@ -941,6 +1001,142 @@ impl Database {
         .map(|opt| opt.unwrap_or(false))
         .context("Failed to check secret key")
     }
+
+    // ==================== Webhook Operations ====================
+
+    /// Create or update webhook configuration
+    pub fn save_webhook(&self, webhook: &WebhookRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO webhooks (app_name, secret, provider, deploy_branch, auto_deploy, status_token, repo_name, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+             ON CONFLICT(app_name) DO UPDATE SET
+                secret = excluded.secret,
+                provider = excluded.provider,
+                deploy_branch = excluded.deploy_branch,
+                auto_deploy = excluded.auto_deploy,
+                status_token = excluded.status_token,
+                repo_name = excluded.repo_name,
+                updated_at = datetime('now')",
+            params![
+                webhook.app_name, webhook.secret, webhook.provider,
+                webhook.deploy_branch, webhook.auto_deploy,
+                webhook.status_token, webhook.repo_name
+            ],
+        )?;
+        info!(app = %webhook.app_name, "Webhook configuration saved");
+        Ok(())
+    }
+
+    /// Get webhook configuration for an app
+    pub fn get_webhook(&self, app_name: &str) -> Result<Option<WebhookRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT app_name, secret, provider, deploy_branch, auto_deploy, status_token, repo_name, created_at, updated_at
+             FROM webhooks WHERE app_name = ?1",
+            params![app_name],
+            |row| {
+                Ok(WebhookRecord {
+                    app_name: row.get(0)?,
+                    secret: row.get(1)?,
+                    provider: row.get(2)?,
+                    deploy_branch: row.get(3)?,
+                    auto_deploy: row.get(4)?,
+                    status_token: row.get(5)?,
+                    repo_name: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to get webhook")
+    }
+
+    /// Delete webhook configuration
+    pub fn delete_webhook(&self, app_name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute("DELETE FROM webhooks WHERE app_name = ?1", params![app_name])?;
+        Ok(rows > 0)
+    }
+
+    /// Log a webhook event
+    pub fn log_webhook_event(&self, event: &WebhookEventRecord) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO webhook_events (app_name, event_type, provider, branch, commit_sha, commit_message, author, payload, triggered_deploy, deployment_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                event.app_name, event.event_type, event.provider, event.branch,
+                event.commit_sha, event.commit_message, event.author, event.payload,
+                event.triggered_deploy, event.deployment_id
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Get recent webhook events for an app
+    pub fn get_webhook_events(&self, app_name: &str, limit: usize) -> Result<Vec<WebhookEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, event_type, provider, branch, commit_sha, commit_message, author, payload, triggered_deploy, deployment_id, created_at
+             FROM webhook_events WHERE app_name = ?1 ORDER BY created_at DESC LIMIT ?2"
+        )?;
+
+        let events = stmt.query_map(params![app_name, limit as i64], |row| {
+            Ok(WebhookEventRecord {
+                id: Some(row.get(0)?),
+                app_name: row.get(1)?,
+                event_type: row.get(2)?,
+                provider: row.get(3)?,
+                branch: row.get(4)?,
+                commit_sha: row.get(5)?,
+                commit_message: row.get(6)?,
+                author: row.get(7)?,
+                payload: row.get(8)?,
+                triggered_deploy: row.get(9)?,
+                deployment_id: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    /// Update build status for an app
+    pub fn update_build_status(&self, app_name: &str, status: &str, commit_sha: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO build_status (app_name, status, commit_sha, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(app_name) DO UPDATE SET
+                status = excluded.status,
+                commit_sha = excluded.commit_sha,
+                updated_at = datetime('now')",
+            params![app_name, status, commit_sha],
+        )?;
+        Ok(())
+    }
+
+    /// Get build status for an app
+    pub fn get_build_status(&self, app_name: &str) -> Result<Option<BuildStatusRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT app_name, status, commit_sha, updated_at FROM build_status WHERE app_name = ?1",
+            params![app_name],
+            |row| {
+                Ok(BuildStatusRecord {
+                    app_name: row.get(0)?,
+                    status: row.get(1)?,
+                    commit_sha: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to get build status")
+    }
 }
 
 // ==================== Record Types ====================
@@ -1035,6 +1231,46 @@ pub struct EncryptionKeyRecord {
     pub is_current: bool,
     pub created_at: String,
     pub rotated_at: Option<String>,
+}
+
+/// Webhook configuration record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookRecord {
+    pub app_name: String,
+    pub secret: String,
+    pub provider: String,
+    pub deploy_branch: String,
+    pub auto_deploy: bool,
+    pub status_token: Option<String>,
+    pub repo_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Webhook event record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEventRecord {
+    pub id: Option<i64>,
+    pub app_name: String,
+    pub event_type: String,
+    pub provider: String,
+    pub branch: Option<String>,
+    pub commit_sha: Option<String>,
+    pub commit_message: Option<String>,
+    pub author: Option<String>,
+    pub payload: Option<String>,
+    pub triggered_deploy: bool,
+    pub deployment_id: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Build status record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildStatusRecord {
+    pub app_name: String,
+    pub status: String,
+    pub commit_sha: Option<String>,
+    pub updated_at: String,
 }
 
 #[cfg(test)]
