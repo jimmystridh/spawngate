@@ -18,13 +18,20 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
+
+/// Default API URL
+const DEFAULT_API_URL: &str = "http://127.0.0.1:9999";
 
 /// PaaS configuration stored in ~/.paas/config.json
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PaasConfig {
     /// API endpoint
     api_url: Option<String>,
+    /// API token
+    api_token: Option<String>,
     /// Current app context
     current_app: Option<String>,
     /// Known apps
@@ -42,6 +49,52 @@ struct AppConfig {
     addons: Vec<String>,
     /// Custom domain
     domain: Option<String>,
+}
+
+/// API response wrapper
+#[derive(Debug, Deserialize)]
+struct ApiResponse<T> {
+    success: bool,
+    data: Option<T>,
+    error: Option<String>,
+}
+
+/// App data from API
+#[derive(Debug, Deserialize, Serialize)]
+struct App {
+    name: String,
+    status: String,
+    git_url: Option<String>,
+    image: Option<String>,
+    port: u16,
+    env: HashMap<String, String>,
+    addons: Vec<String>,
+    created_at: String,
+    deployed_at: Option<String>,
+    commit: Option<String>,
+}
+
+/// Add-on instance from API
+#[derive(Debug, Deserialize)]
+struct AddonInstance {
+    id: String,
+    addon_type: String,
+    plan: String,
+    app_name: String,
+    container_name: String,
+    connection_url: String,
+    env_var_name: String,
+    status: String,
+}
+
+/// Build result from API
+#[derive(Debug, Deserialize)]
+struct BuildResult {
+    success: bool,
+    image: String,
+    duration_secs: f64,
+    logs: Vec<String>,
+    error: Option<String>,
 }
 
 /// CLI command structure
@@ -74,8 +127,11 @@ enum AddonsCommand {
 
 #[derive(Debug)]
 struct DeployOptions {
+    #[allow(dead_code)]
     path: Option<PathBuf>,
+    #[allow(dead_code)]
     build_only: bool,
+    clear_cache: bool,
 }
 
 #[derive(Debug)]
@@ -91,11 +147,97 @@ enum ConfigCommand {
     Get { key: String },
     Set { key: String, value: String },
     List,
+    ApiUrl { url: Option<String> },
+    ApiToken { token: Option<String> },
 }
 
 #[derive(Debug)]
 struct InitOptions {
     name: Option<String>,
+}
+
+/// Simple HTTP client for API calls
+struct ApiClient {
+    base_url: String,
+    token: String,
+}
+
+impl ApiClient {
+    fn new() -> Result<Self> {
+        let config = load_config()?;
+        let base_url = config.api_url
+            .or_else(|| env::var("PAAS_API_URL").ok())
+            .unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        let token = config.api_token
+            .or_else(|| env::var("PAAS_API_TOKEN").ok())
+            .unwrap_or_else(|| "changeme".to_string());
+
+        Ok(Self { base_url, token })
+    }
+
+    fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
+        // Parse URL
+        let url = format!("{}{}", self.base_url, path);
+        let url = url.strip_prefix("http://").unwrap_or(&url);
+        let (host_port, path) = if let Some(idx) = url.find('/') {
+            (&url[..idx], &url[idx..])
+        } else {
+            (url, "/")
+        };
+
+        // Connect
+        let mut stream = TcpStream::connect(host_port)
+            .context(format!("Failed to connect to API at {}", self.base_url))?;
+
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+
+        // Build request
+        let body_bytes = body.unwrap_or("");
+        let request = format!(
+            "{} {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Authorization: Bearer {}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            method, path, host_port, self.token, body_bytes.len(), body_bytes
+        );
+
+        // Send request
+        stream.write_all(request.as_bytes())?;
+        stream.flush()?;
+
+        // Read response
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+
+        // Parse response - find body after headers
+        if let Some(idx) = response.find("\r\n\r\n") {
+            let body = &response[idx + 4..];
+            Ok(body.to_string())
+        } else {
+            Ok(response)
+        }
+    }
+
+    fn get(&self, path: &str) -> Result<String> {
+        self.request("GET", path, None)
+    }
+
+    fn post(&self, path: &str, body: &str) -> Result<String> {
+        self.request("POST", path, Some(body))
+    }
+
+    fn delete(&self, path: &str) -> Result<String> {
+        self.request("DELETE", path, None)
+    }
+
+    fn put(&self, path: &str, body: &str) -> Result<String> {
+        self.request("PUT", path, Some(body))
+    }
 }
 
 fn main() {
@@ -203,9 +345,12 @@ fn parse_addons_command(args: &[String]) -> Command {
 }
 
 fn parse_deploy_command(args: &[String]) -> Command {
-    let path = args.get(0).map(PathBuf::from);
+    let path = args.iter()
+        .find(|a| !a.starts_with('-'))
+        .map(PathBuf::from);
     let build_only = args.iter().any(|a| a == "--build-only" || a == "-b");
-    Command::Deploy(DeployOptions { path, build_only })
+    let clear_cache = args.iter().any(|a| a == "--no-cache" || a == "--clear-cache");
+    Command::Deploy(DeployOptions { path, build_only, clear_cache })
 }
 
 fn parse_logs_command(args: &[String]) -> Command {
@@ -233,6 +378,14 @@ fn parse_config_command(args: &[String]) -> Command {
             let value = args.get(2).cloned().unwrap_or_default();
             Command::Config(ConfigCommand::Set { key, value })
         }
+        "api-url" | "api_url" => {
+            let url = args.get(1).cloned();
+            Command::Config(ConfigCommand::ApiUrl { url })
+        }
+        "api-token" | "api_token" | "token" => {
+            let token = args.get(1).cloned();
+            Command::Config(ConfigCommand::ApiToken { token })
+        }
         _ => Command::Config(ConfigCommand::List),
     }
 }
@@ -243,43 +396,96 @@ fn parse_init_command(args: &[String]) -> Command {
 }
 
 fn handle_apps(cmd: AppsCommand) -> Result<()> {
+    let client = ApiClient::new()?;
+
     match cmd {
         AppsCommand::Create { name } => {
             println!("Creating app: {}", name);
-            println!();
 
-            // In a real implementation, this would call the API
-            let git_url = format!("git@localhost:2222/{}.git", name);
-            let app_url = format!("https://{}.localhost", name);
+            let body = serde_json::json!({
+                "name": name,
+                "port": 3000
+            });
 
-            println!("App {} created successfully!", name);
-            println!();
-            println!("Git remote:");
-            println!("  {}", git_url);
-            println!();
-            println!("Add the remote to your project:");
-            println!("  git remote add paas {}", git_url);
-            println!();
-            println!("Deploy with:");
-            println!("  git push paas main");
-            println!();
-            println!("Your app will be available at:");
-            println!("  {}", app_url);
+            let response = client.post("/apps", &body.to_string())?;
+            let result: ApiResponse<App> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(app) = result.data {
+                    println!();
+                    println!("App {} created successfully!", app.name);
+                    println!();
+                    if let Some(git_url) = &app.git_url {
+                        println!("Git remote:");
+                        println!("  {}", git_url);
+                        println!();
+                        println!("Add the remote to your project:");
+                        println!("  git remote add paas {}", git_url);
+                    }
+                    println!();
+                    println!("Deploy with:");
+                    println!("  git push paas main");
+                    println!();
+                    println!("Your app will be available at:");
+                    println!("  https://{}.localhost", app.name);
+
+                    // Save to local config
+                    let mut config = load_config()?;
+                    config.apps.insert(app.name.clone(), AppConfig {
+                        name: app.name.clone(),
+                        git_url: app.git_url,
+                        addons: app.addons,
+                        domain: None,
+                    });
+                    config.current_app = Some(app.name);
+                    save_config(&config)?;
+                }
+            } else {
+                println!("Failed to create app: {}", result.error.unwrap_or_default());
+            }
         }
         AppsCommand::List => {
+            let response = client.get("/apps")?;
+            let result: ApiResponse<Vec<App>> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
             println!("Apps:");
             println!();
 
-            let config = load_config()?;
-            if config.apps.is_empty() {
-                println!("  No apps yet. Create one with: paas apps create <name>");
-            } else {
-                for (name, app) in &config.apps {
-                    let status = "running"; // Would check actual status
-                    println!("  {} ({}) - {}.localhost", name, status, name);
-                    if !app.addons.is_empty() {
-                        println!("    Add-ons: {}", app.addons.join(", "));
+            if result.success {
+                if let Some(apps) = result.data {
+                    if apps.is_empty() {
+                        println!("  No apps yet. Create one with: paas apps create <name>");
+                    } else {
+                        for app in apps {
+                            println!("  {} ({}) - {}.localhost",
+                                app.name,
+                                app.status,
+                                app.name
+                            );
+                            if !app.addons.is_empty() {
+                                println!("    Add-ons: {}", app.addons.join(", "));
+                            }
+                        }
                     }
+                }
+            } else {
+                // API might not be running, fall back to local config
+                let config = load_config()?;
+                if config.apps.is_empty() {
+                    println!("  No apps yet. Create one with: paas apps create <name>");
+                    println!();
+                    println!("  Note: API not reachable at {}", client.base_url);
+                } else {
+                    for (name, app) in &config.apps {
+                        println!("  {} (unknown) - {}.localhost", name, name);
+                        if !app.addons.is_empty() {
+                            println!("    Add-ons: {}", app.addons.join(", "));
+                        }
+                    }
+                    println!();
+                    println!("  Note: Status unknown - API not reachable");
                 }
             }
         }
@@ -296,30 +502,87 @@ fn handle_apps(cmd: AppsCommand) -> Result<()> {
             println!("  - Remove all add-ons and their data");
             println!("  - Delete the git repository");
             println!();
-            println!("Type the app name to confirm: ");
 
-            // In a real implementation, would prompt for confirmation
-            println!("App {} deleted.", name);
-        }
-        AppsCommand::Info { name } => {
-            if name.is_empty() {
-                println!("Usage: paas apps info <name>");
+            // Prompt for confirmation
+            print!("Type the app name to confirm: ");
+            std::io::stdout().flush()?;
+            let mut confirmation = String::new();
+            std::io::stdin().read_line(&mut confirmation)?;
+
+            if confirmation.trim() != name {
+                println!("Aborted - name did not match");
                 return Ok(());
             }
 
-            println!("App: {}", name);
-            println!();
-            println!("Status:     running");
-            println!("URL:        https://{}.localhost", name);
-            println!("Git:        git@localhost:2222/{}.git", name);
-            println!("Created:    2024-01-01 12:00:00");
-            println!();
-            println!("Add-ons:");
-            println!("  postgres:hobby  DATABASE_URL");
-            println!("  redis:hobby     REDIS_URL");
-            println!();
-            println!("Recent deploys:");
-            println!("  abc1234  2024-01-01 12:00:00  Initial deploy");
+            let response = client.delete(&format!("/apps/{}", name))?;
+            let result: ApiResponse<()> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!("App {} deleted.", name);
+
+                // Remove from local config
+                let mut config = load_config()?;
+                config.apps.remove(&name);
+                if config.current_app.as_ref() == Some(&name) {
+                    config.current_app = None;
+                }
+                save_config(&config)?;
+            } else {
+                println!("Failed to delete app: {}", result.error.unwrap_or_default());
+            }
+        }
+        AppsCommand::Info { name } => {
+            let app_name = if name.is_empty() {
+                get_current_app()?
+            } else {
+                name
+            };
+
+            let response = client.get(&format!("/apps/{}", app_name))?;
+            let result: ApiResponse<App> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(app) = result.data {
+                    println!("App: {}", app.name);
+                    println!();
+                    println!("Status:     {}", app.status);
+                    println!("URL:        https://{}.localhost", app.name);
+                    if let Some(git_url) = &app.git_url {
+                        println!("Git:        {}", git_url);
+                    }
+                    println!("Port:       {}", app.port);
+                    println!("Created:    {}", app.created_at);
+                    if let Some(deployed) = &app.deployed_at {
+                        println!("Deployed:   {}", deployed);
+                    }
+                    if let Some(commit) = &app.commit {
+                        println!("Commit:     {}", commit);
+                    }
+                    if let Some(image) = &app.image {
+                        println!("Image:      {}", image);
+                    }
+
+                    if !app.addons.is_empty() {
+                        println!();
+                        println!("Add-ons:");
+                        for addon in &app.addons {
+                            println!("  {}", addon);
+                        }
+                    }
+
+                    if !app.env.is_empty() {
+                        println!();
+                        println!("Config:");
+                        for (key, _) in &app.env {
+                            println!("  {}=<set>", key);
+                        }
+                    }
+                }
+            } else {
+                println!("App not found: {}", app_name);
+            }
         }
     }
 
@@ -327,6 +590,7 @@ fn handle_apps(cmd: AppsCommand) -> Result<()> {
 }
 
 fn handle_addons(cmd: AddonsCommand) -> Result<()> {
+    let client = ApiClient::new()?;
     let current_app = get_current_app()?;
 
     match cmd {
@@ -350,53 +614,33 @@ fn handle_addons(cmd: AddonsCommand) -> Result<()> {
             let plan = plan.unwrap_or_else(|| "hobby".to_string());
 
             println!("Adding {} ({}) to {}...", addon_type, plan, current_app);
-            println!();
 
-            match addon_type.as_str() {
-                "postgres" | "postgresql" | "pg" => {
-                    println!("PostgreSQL provisioned!");
+            let body = serde_json::json!({
+                "type": addon_type,
+                "plan": plan
+            });
+
+            let response = client.post(&format!("/apps/{}/addons", current_app), &body.to_string())?;
+            let result: ApiResponse<AddonInstance> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(addon) = result.data {
+                    println!();
+                    println!("{} provisioned!", addon.addon_type);
+                    println!();
+                    println!("Container:  {}", addon.container_name);
+                    println!("Status:     {}", addon.status);
                     println!();
                     println!("Connection info added to your app:");
-                    println!("  DATABASE_URL=postgres://user:pass@postgres:5432/db");
-                    println!("  PGHOST=postgres");
-                    println!("  PGPORT=5432");
-                    println!("  PGUSER=user");
-                    println!("  PGPASSWORD=<generated>");
-                    println!("  PGDATABASE=db");
-                }
-                "redis" => {
-                    println!("Redis provisioned!");
+                    println!("  {}={}", addon.env_var_name, addon.connection_url);
                     println!();
-                    println!("Connection info added to your app:");
-                    println!("  REDIS_URL=redis://:pass@redis:6379");
-                    println!("  REDIS_HOST=redis");
-                    println!("  REDIS_PORT=6379");
-                    println!("  REDIS_PASSWORD=<generated>");
+                    println!("Restart your app to apply changes:");
+                    println!("  git push paas main");
                 }
-                "storage" | "s3" | "minio" => {
-                    println!("S3-compatible storage provisioned!");
-                    println!();
-                    println!("Connection info added to your app:");
-                    println!("  S3_ENDPOINT=http://minio:9000");
-                    println!("  S3_ACCESS_KEY=<generated>");
-                    println!("  S3_SECRET_KEY=<generated>");
-                    println!("  S3_BUCKET={}-uploads", current_app);
-                    println!();
-                    println!("AWS SDK compatible:");
-                    println!("  AWS_ACCESS_KEY_ID=<generated>");
-                    println!("  AWS_SECRET_ACCESS_KEY=<generated>");
-                    println!("  AWS_ENDPOINT_URL=http://minio:9000");
-                }
-                _ => {
-                    println!("Unknown add-on type: {}", addon_type);
-                    println!("Available: postgres, redis, storage");
-                    return Ok(());
-                }
+            } else {
+                println!("Failed to add add-on: {}", result.error.unwrap_or_default());
             }
-
-            println!();
-            println!("Restart your app to apply changes:");
-            println!("  git push paas main");
         }
         AddonsCommand::Remove { addon_type } => {
             if addon_type.is_empty() {
@@ -408,16 +652,56 @@ fn handle_addons(cmd: AddonsCommand) -> Result<()> {
             println!();
             println!("WARNING: This will delete all data in this add-on!");
             println!();
-            println!("Add-on {} removed.", addon_type);
+
+            print!("Type 'yes' to confirm: ");
+            std::io::stdout().flush()?;
+            let mut confirmation = String::new();
+            std::io::stdin().read_line(&mut confirmation)?;
+
+            if confirmation.trim() != "yes" {
+                println!("Aborted");
+                return Ok(());
+            }
+
+            let response = client.delete(&format!("/apps/{}/addons/{}", current_app, addon_type))?;
+            let result: ApiResponse<()> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!("Add-on {} removed.", addon_type);
+            } else {
+                println!("Failed to remove add-on: {}", result.error.unwrap_or_default());
+            }
         }
         AddonsCommand::List => {
+            let response = client.get(&format!("/apps/{}/addons", current_app))?;
+            let result: ApiResponse<Vec<AddonInstance>> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
             println!("Add-ons for {}:", current_app);
             println!();
-            println!("  TYPE       PLAN      ENV VAR");
-            println!("  postgres   hobby     DATABASE_URL");
-            println!("  redis      hobby     REDIS_URL");
-            println!();
-            println!("Add more with: paas addons add <type>");
+
+            if result.success {
+                if let Some(addons) = result.data {
+                    if addons.is_empty() {
+                        println!("  No add-ons attached.");
+                        println!();
+                        println!("Add one with: paas addons add <type>");
+                    } else {
+                        println!("  TYPE       PLAN      STATUS     ENV VAR");
+                        for addon in addons {
+                            println!("  {:10} {:9} {:10} {}",
+                                addon.addon_type,
+                                addon.plan,
+                                addon.status,
+                                addon.env_var_name
+                            );
+                        }
+                    }
+                }
+            } else {
+                println!("  Failed to fetch add-ons: {}", result.error.unwrap_or_default());
+            }
         }
     }
 
@@ -425,102 +709,60 @@ fn handle_addons(cmd: AddonsCommand) -> Result<()> {
 }
 
 fn handle_deploy(opts: DeployOptions) -> Result<()> {
-    let path = opts.path.unwrap_or_else(|| PathBuf::from("."));
+    let client = ApiClient::new()?;
     let current_app = get_current_app()?;
 
-    println!("Deploying {} from {}...", current_app, path.display());
+    println!("Deploying {}...", current_app);
     println!();
 
-    // Detect build mode
-    println!("Detecting build mode...");
+    let body = serde_json::json!({
+        "clear_cache": opts.clear_cache
+    });
 
-    // Check for Dockerfile first (highest priority)
-    if path.join("Dockerfile").exists() {
-        println!("  Found: Dockerfile");
-        println!("  Build: docker build");
-        println!();
+    let response = client.post(&format!("/apps/{}/deploy", current_app), &body.to_string())?;
+    let result: ApiResponse<BuildResult> = serde_json::from_str(&response)
+        .context("Failed to parse API response")?;
 
-        if opts.build_only {
-            println!("Building image...");
-            println!();
-            println!("  docker build -t {}:latest {}", current_app, path.display());
-        } else {
-            println!("Deploy with:");
-            println!("  git push paas main");
-            println!();
-            println!("Or build locally:");
-            println!("  docker build -t {}:latest {}", current_app, path.display());
-        }
-        return Ok(());
-    }
-
-    // Check for docker-compose
-    let compose_files = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
-    for compose_file in &compose_files {
-        if path.join(compose_file).exists() {
-            println!("  Found: {}", compose_file);
-            println!("  Build: docker compose");
-            println!();
-
-            if opts.build_only {
-                println!("Building services...");
+    if result.success {
+        if let Some(build) = result.data {
+            if build.success {
+                println!("Build successful!");
                 println!();
-                println!("  docker compose -f {} build", compose_file);
+                println!("Image:    {}", build.image);
+                println!("Duration: {:.1}s", build.duration_secs);
+                println!();
+                println!("Build logs:");
+                for log in build.logs.iter().take(20) {
+                    println!("  {}", log);
+                }
+                if build.logs.len() > 20 {
+                    println!("  ... ({} more lines)", build.logs.len() - 20);
+                }
             } else {
-                println!("Deploy with:");
-                println!("  git push paas main");
+                println!("Build failed!");
                 println!();
-                println!("Or run locally:");
-                println!("  docker compose -f {} up -d", compose_file);
+                if let Some(error) = build.error {
+                    println!("Error: {}", error);
+                }
+                println!();
+                println!("Build logs:");
+                for log in build.logs.iter().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
+                    println!("  {}", log);
+                }
             }
-            return Ok(());
         }
-    }
-
-    // Fall back to buildpack detection
-    println!("  No Dockerfile found, using buildpacks");
-    println!();
-
-    // Detect app type for buildpacks
-    println!("Detecting app type...");
-    if path.join("package.json").exists() {
-        println!("  Detected: Node.js (paketo-buildpacks/nodejs)");
-    } else if path.join("requirements.txt").exists() || path.join("pyproject.toml").exists() {
-        println!("  Detected: Python (paketo-buildpacks/python)");
-    } else if path.join("Gemfile").exists() {
-        println!("  Detected: Ruby (paketo-buildpacks/ruby)");
-    } else if path.join("go.mod").exists() {
-        println!("  Detected: Go (paketo-buildpacks/go)");
-    } else if path.join("Cargo.toml").exists() {
-        println!("  Detected: Rust (paketo-community/rust)");
-    } else if path.join("pom.xml").exists() || path.join("build.gradle").exists() {
-        println!("  Detected: Java (paketo-buildpacks/java)");
     } else {
-        println!("  Could not detect app type");
-        println!("  Will use auto-detection during build");
+        println!("Deployment failed: {}", result.error.unwrap_or_default());
         println!();
-        println!("Tip: Add a Dockerfile for more control over the build");
-    }
-    println!();
-
-    if opts.build_only {
-        println!("Building image...");
-        println!();
-        println!("  pack build {}:latest --builder paketobuildpacks/builder-jammy-base --path {}",
-            current_app, path.display());
-    } else {
-        println!("Deploy with:");
+        println!("Make sure to push your code first:");
         println!("  git push paas main");
-        println!();
-        println!("Or build locally:");
-        println!("  pack build {}:latest --builder paketobuildpacks/builder-jammy-base --path {}",
-            current_app, path.display());
     }
 
     Ok(())
 }
 
 fn handle_logs(opts: LogsOptions) -> Result<()> {
+    let client = ApiClient::new()?;
     let app = opts.app.unwrap_or_else(|| get_current_app().unwrap_or_default());
 
     if app.is_empty() {
@@ -534,16 +776,29 @@ fn handle_logs(opts: LogsOptions) -> Result<()> {
     }
     println!();
 
-    // Simulated log output
-    println!("2024-01-01T12:00:00Z app[web]: Listening on port 3000");
-    println!("2024-01-01T12:00:01Z app[web]: Connected to database");
-    println!("2024-01-01T12:00:02Z app[web]: Server ready");
+    let response = client.get(&format!("/apps/{}/logs", app))?;
+    let result: ApiResponse<Vec<String>> = serde_json::from_str(&response)
+        .context("Failed to parse API response")?;
+
+    if result.success {
+        if let Some(logs) = result.data {
+            if logs.is_empty() {
+                println!("No logs available yet.");
+            } else {
+                for log in logs {
+                    println!("{}", log);
+                }
+            }
+        }
+    } else {
+        println!("Failed to fetch logs: {}", result.error.unwrap_or_default());
+    }
 
     Ok(())
 }
 
 fn handle_config(cmd: ConfigCommand) -> Result<()> {
-    let current_app = get_current_app().ok();
+    let mut config = load_config()?;
 
     match cmd {
         ConfigCommand::Get { key } => {
@@ -551,27 +806,117 @@ fn handle_config(cmd: ConfigCommand) -> Result<()> {
                 println!("Usage: paas config get <key>");
                 return Ok(());
             }
-            println!("{}=<value>", key);
+
+            let client = ApiClient::new()?;
+            let current_app = get_current_app()?;
+
+            let response = client.get(&format!("/apps/{}/config", current_app))?;
+            let result: ApiResponse<HashMap<String, String>> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(env) = result.data {
+                    if let Some(value) = env.get(&key) {
+                        println!("{}={}", key, value);
+                    } else {
+                        println!("Key not found: {}", key);
+                    }
+                }
+            } else {
+                println!("Failed to fetch config: {}", result.error.unwrap_or_default());
+            }
         }
         ConfigCommand::Set { key, value } => {
-            if key.is_empty() || value.is_empty() {
+            if key.is_empty() {
                 println!("Usage: paas config set <key> <value>");
                 return Ok(());
             }
-            println!("Setting {}={} for {}", key, value, current_app.unwrap_or_default());
-            println!();
-            println!("Restart your app to apply changes:");
-            println!("  git push paas main");
+
+            let client = ApiClient::new()?;
+            let current_app = get_current_app()?;
+
+            let body = serde_json::json!({
+                "env": {
+                    key.clone(): value.clone()
+                }
+            });
+
+            let response = client.put(&format!("/apps/{}/config", current_app), &body.to_string())?;
+            let result: ApiResponse<()> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if value.is_empty() {
+                    println!("Removed {} from {}", key, current_app);
+                } else {
+                    println!("Set {}={} for {}", key, value, current_app);
+                }
+                println!();
+                println!("Restart your app to apply changes:");
+                println!("  git push paas main");
+            } else {
+                println!("Failed to set config: {}", result.error.unwrap_or_default());
+            }
         }
         ConfigCommand::List => {
-            let app = current_app.unwrap_or_else(|| "my-app".to_string());
-            println!("Config for {}:", app);
+            let client = ApiClient::new()?;
+            let current_app = get_current_app().ok();
+
+            if let Some(app) = current_app {
+                let response = client.get(&format!("/apps/{}/config", app))?;
+                let result: ApiResponse<HashMap<String, String>> = serde_json::from_str(&response)
+                    .unwrap_or(ApiResponse { success: false, data: None, error: Some("API error".to_string()) });
+
+                println!("Config for {}:", app);
+                println!();
+
+                if result.success {
+                    if let Some(env) = result.data {
+                        if env.is_empty() {
+                            println!("  No config set.");
+                        } else {
+                            for (key, value) in &env {
+                                // Mask sensitive values
+                                let display_value = if key.contains("PASSWORD") || key.contains("SECRET") || key.contains("KEY") {
+                                    "<hidden>".to_string()
+                                } else if value.len() > 50 {
+                                    format!("{}...", &value[..50])
+                                } else {
+                                    value.clone()
+                                };
+                                println!("  {}={}", key, display_value);
+                            }
+                        }
+                    }
+                } else {
+                    println!("  Failed to fetch config from API");
+                }
+            } else {
+                println!("No app selected. Use: paas apps info <name>");
+            }
+
             println!();
-            println!("  DATABASE_URL=postgres://...");
-            println!("  REDIS_URL=redis://...");
-            println!("  NODE_ENV=production");
-            println!();
-            println!("Set config with: paas config set <key> <value>");
+            println!("CLI Config:");
+            println!("  API URL:   {}", config.api_url.as_deref().unwrap_or(DEFAULT_API_URL));
+            println!("  API Token: {}", if config.api_token.is_some() { "<set>" } else { "<not set>" });
+        }
+        ConfigCommand::ApiUrl { url } => {
+            if let Some(url) = url {
+                config.api_url = Some(url.clone());
+                save_config(&config)?;
+                println!("API URL set to: {}", url);
+            } else {
+                println!("Current API URL: {}", config.api_url.as_deref().unwrap_or(DEFAULT_API_URL));
+            }
+        }
+        ConfigCommand::ApiToken { token } => {
+            if let Some(token) = token {
+                config.api_token = Some(token);
+                save_config(&config)?;
+                println!("API token updated");
+            } else {
+                println!("Current API token: {}", if config.api_token.is_some() { "<set>" } else { "<not set>" });
+            }
         }
     }
 
@@ -589,26 +934,66 @@ fn handle_init(opts: InitOptions) -> Result<()> {
     println!("Initializing new app: {}", name);
     println!();
 
-    // Create app
-    println!("Creating app on platform...");
-    println!();
+    // Create the app via API
+    let client = ApiClient::new()?;
+    let body = serde_json::json!({
+        "name": name,
+        "port": 3000
+    });
 
-    let git_url = format!("git@localhost:2222/{}.git", name);
+    let response = client.post("/apps", &body.to_string())?;
+    let result: ApiResponse<App> = serde_json::from_str(&response)
+        .context("Failed to parse API response")?;
 
-    println!("App {} created!", name);
-    println!();
-    println!("Next steps:");
-    println!();
-    println!("  1. Add the git remote:");
-    println!("     git remote add paas {}", git_url);
-    println!();
-    println!("  2. Add database (optional):");
-    println!("     paas addons add postgres");
-    println!();
-    println!("  3. Deploy:");
-    println!("     git push paas main");
-    println!();
-    println!("Your app will be available at: https://{}.localhost", name);
+    if result.success {
+        if let Some(app) = result.data {
+            println!("App {} created!", app.name);
+            println!();
+
+            // Save to local config
+            let mut config = load_config()?;
+            config.apps.insert(app.name.clone(), AppConfig {
+                name: app.name.clone(),
+                git_url: app.git_url.clone(),
+                addons: app.addons,
+                domain: None,
+            });
+            config.current_app = Some(app.name.clone());
+            save_config(&config)?;
+
+            println!("Next steps:");
+            println!();
+            if let Some(git_url) = &app.git_url {
+                println!("  1. Add the git remote:");
+                println!("     git remote add paas {}", git_url);
+            }
+            println!();
+            println!("  2. Add database (optional):");
+            println!("     paas addons add postgres");
+            println!();
+            println!("  3. Deploy:");
+            println!("     git push paas main");
+            println!();
+            println!("Your app will be available at: https://{}.localhost", app.name);
+        }
+    } else {
+        let error = result.error.unwrap_or_else(|| "Unknown error".to_string());
+        if error.contains("already exists") {
+            println!("App {} already exists. Connecting to it...", name);
+
+            let mut config = load_config()?;
+            config.current_app = Some(name.clone());
+            save_config(&config)?;
+
+            println!();
+            println!("Connected to existing app: {}", name);
+        } else {
+            println!("Failed to create app: {}", error);
+            println!();
+            println!("Make sure the PaaS API is running:");
+            println!("  spawngate --api-port 9999 config.toml");
+        }
+    }
 
     Ok(())
 }
@@ -636,6 +1021,8 @@ COMMANDS:
     config list              List environment variables
     config set <key> <val>   Set environment variable
     config get <key>         Get environment variable
+    config api-url [url]     Set/get API URL
+    config api-token [token] Set/get API token
 
 BUILD MODES (auto-detected):
     Dockerfile               docker build (highest priority)
@@ -659,11 +1046,12 @@ EXAMPLES:
 ENVIRONMENT:
     PAAS_APP                 Current app context
     PAAS_API_URL             API endpoint (default: http://localhost:9999)
+    PAAS_API_TOKEN           API authentication token
 "#);
 }
 
 fn print_version() {
-    println!("paas 0.1.0");
+    println!("paas {}", env!("CARGO_PKG_VERSION"));
     println!("Powered by Spawngate");
 }
 
@@ -722,7 +1110,6 @@ fn load_config() -> Result<PaasConfig> {
     Ok(config)
 }
 
-#[allow(dead_code)]
 fn save_config(config: &PaasConfig) -> Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {

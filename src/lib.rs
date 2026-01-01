@@ -15,6 +15,7 @@
 pub mod acme;
 pub mod addons;
 pub mod admin;
+pub mod api;
 pub mod builder;
 pub mod config;
 pub mod docker;
