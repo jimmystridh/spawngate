@@ -7,6 +7,7 @@ use crate::addons::{AddonConfig, AddonManager, AddonPlan, AddonType};
 use crate::builder::{BuildConfig, BuildMode, Builder};
 use crate::dashboard;
 use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord, WebhookRecord, WebhookEventRecord};
+use crate::domains::{DnsVerifier, DomainManager, SslManager};
 use crate::docker::DockerManager;
 use crate::dyno::{DynoConfig, DynoManager};
 use crate::git::{GitServer, GitServerConfig};
@@ -157,6 +158,12 @@ pub struct SetSecretsRequest {
     pub secrets: HashMap<String, String>,
 }
 
+/// Add a custom domain to an app
+#[derive(Debug, Deserialize)]
+pub struct AddDomainRequest {
+    pub domain: String,
+}
+
 /// API response wrapper
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {
@@ -197,6 +204,9 @@ pub struct PlatformApi {
     secrets_manager: Arc<tokio::sync::RwLock<SecretsManager>>,
     webhook_handler: Arc<tokio::sync::RwLock<WebhookHandler>>,
     status_notifier: Arc<StatusNotifier>,
+    domain_manager: Arc<DomainManager>,
+    dns_verifier: Arc<DnsVerifier>,
+    ssl_manager: Arc<SslManager>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -272,6 +282,27 @@ impl PlatformApi {
         // Initialize status notifier for CI updates
         let status_notifier = StatusNotifier::new();
 
+        // Initialize domain management
+        let domain_manager = DomainManager::new();
+        let dns_verifier = DnsVerifier::new();
+        let ssl_manager = SslManager::new(config.data_dir.join("certs"));
+
+        // Load existing domains from database
+        if let Ok(domains) = db_arc.get_all_domains() {
+            let domain_count = domains.len();
+            for domain_record in domains {
+                domain_manager.add_domain_from_db(
+                    &domain_record.domain,
+                    &domain_record.app_name,
+                    domain_record.verified,
+                    domain_record.ssl_enabled,
+                    domain_record.verification_token,
+                    domain_record.cert_expires_at,
+                ).await;
+            }
+            debug!("Loaded {} custom domains from database", domain_count);
+        }
+
         Ok(Self {
             config,
             db: db_arc,
@@ -283,6 +314,9 @@ impl PlatformApi {
             secrets_manager: Arc::new(tokio::sync::RwLock::new(secrets_manager)),
             webhook_handler: Arc::new(tokio::sync::RwLock::new(webhook_handler)),
             status_notifier: Arc::new(status_notifier),
+            domain_manager: Arc::new(domain_manager),
+            dns_verifier: Arc::new(dns_verifier),
+            ssl_manager: Arc::new(ssl_manager),
             shutdown_rx,
         })
     }
@@ -549,6 +583,48 @@ impl PlatformApi {
             (Method::GET, path) if path.ends_with("/badge.svg") => {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/badge.svg")).unwrap_or("");
                 self.get_build_badge(app_name).await
+            }
+
+            // Custom domains
+            (Method::GET, path) if path.ends_with("/domains") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/domains")).unwrap_or("");
+                self.list_domains(app_name).await
+            }
+            (Method::POST, path) if path.ends_with("/domains") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/domains")).unwrap_or("");
+                self.add_domain(app_name, req).await
+            }
+            (Method::DELETE, path) if path.contains("/domains/") => {
+                let parts: Vec<&str> = path.split('/').collect();
+                if parts.len() >= 5 {
+                    let app_name = parts[2];
+                    let domain = parts[4];
+                    self.remove_domain(app_name, domain).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
+            }
+            (Method::POST, path) if path.contains("/domains/") && path.ends_with("/verify") => {
+                let path_trimmed = path.strip_suffix("/verify").unwrap_or("");
+                let parts: Vec<&str> = path_trimmed.split('/').collect();
+                if parts.len() >= 5 {
+                    let app_name = parts[2];
+                    let domain = parts[4];
+                    self.verify_domain(app_name, domain).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
+            }
+            (Method::POST, path) if path.contains("/domains/") && path.ends_with("/ssl") => {
+                let path_trimmed = path.strip_suffix("/ssl").unwrap_or("");
+                let parts: Vec<&str> = path_trimmed.split('/').collect();
+                if parts.len() >= 5 {
+                    let app_name = parts[2];
+                    let domain = parts[4];
+                    self.enable_domain_ssl(app_name, domain).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
             }
 
             // Build trigger (for git hooks)
@@ -1768,6 +1844,212 @@ impl PlatformApi {
             .header("Cache-Control", "no-cache")
             .body(Full::new(svg.into()))
             .expect("valid response"))
+    }
+
+    // ==================== Custom Domains ====================
+
+    async fn list_domains(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let domains = self.db.get_app_domains(app_name)?;
+        let response = ApiResponse::ok(domains);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn add_domain(self: Arc<Self>, app_name: &str, req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let add_req: AddDomainRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)));
+            }
+        };
+
+        // Validate domain
+        let domain = add_req.domain.trim().to_lowercase();
+        if domain.is_empty() || !domain.contains('.') {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Invalid domain format"));
+        }
+
+        // Check if domain already exists
+        if self.db.get_domain(&domain)?.is_some() {
+            return Ok(json_error(StatusCode::CONFLICT, "Domain already exists"));
+        }
+
+        // Generate verification token
+        let verification_token = format!("spawngate-verify-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("xxxx"));
+
+        // Add to database
+        self.db.add_domain(&domain, app_name, &verification_token)?;
+
+        // Add to in-memory manager
+        self.domain_manager.add_domain(&domain, app_name, &verification_token).await;
+
+        info!(domain = %domain, app = %app_name, "Added custom domain");
+
+        // Return instructions for DNS verification
+        let response_data = serde_json::json!({
+            "domain": domain,
+            "app_name": app_name,
+            "verified": false,
+            "ssl_enabled": false,
+            "verification_token": verification_token,
+            "dns_instructions": format!(
+                "Add a TXT record to your DNS:\n\n  Name: _spawngate.{}\n  Value: {}\n\nThen run: paas domains verify {} --app {}",
+                domain, verification_token, domain, app_name
+            )
+        });
+
+        let response = ApiResponse::ok(response_data);
+        Ok(json_response(StatusCode::CREATED, serde_json::to_string(&response)?))
+    }
+
+    async fn remove_domain(&self, app_name: &str, domain: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Check if domain exists and belongs to this app
+        match self.db.get_domain(domain)? {
+            Some(d) if d.app_name == app_name => {}
+            Some(_) => {
+                return Ok(json_error(StatusCode::FORBIDDEN, "Domain belongs to another app"));
+            }
+            None => {
+                return Ok(json_error(StatusCode::NOT_FOUND, "Domain not found"));
+            }
+        }
+
+        // Remove from database
+        self.db.delete_domain(domain)?;
+
+        // Remove from in-memory manager
+        let _ = self.domain_manager.remove_domain(domain).await;
+
+        info!(domain = %domain, app = %app_name, "Removed custom domain");
+
+        let response: ApiResponse<()> = ApiResponse::ok(());
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn verify_domain(&self, app_name: &str, domain: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Get domain record
+        let domain_record = match self.db.get_domain(domain)? {
+            Some(d) if d.app_name == app_name => d,
+            Some(_) => {
+                return Ok(json_error(StatusCode::FORBIDDEN, "Domain belongs to another app"));
+            }
+            None => {
+                return Ok(json_error(StatusCode::NOT_FOUND, "Domain not found"));
+            }
+        };
+
+        if domain_record.verified {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Domain is already verified"));
+        }
+
+        // Verify DNS
+        let expected_token = domain_record.verification_token.unwrap_or_default();
+        match self.dns_verifier.verify(domain, &expected_token).await {
+            Ok(true) => {
+                // Update database
+                self.db.update_domain_verification(domain, true)?;
+
+                // Update in-memory manager
+                let _ = self.domain_manager.set_verified(domain, true).await;
+
+                info!(domain = %domain, "Domain verified successfully");
+
+                let response = ApiResponse::ok(serde_json::json!({
+                    "domain": domain,
+                    "verified": true,
+                    "message": "Domain verified! You can now enable SSL."
+                }));
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            Ok(false) => {
+                warn!(domain = %domain, "DNS verification failed");
+                Ok(json_error(StatusCode::BAD_REQUEST, format!(
+                    "DNS verification failed. Please add a TXT record:\n  Name: _spawngate.{}\n  Value: {}",
+                    domain, expected_token
+                )))
+            }
+            Err(e) => {
+                error!(domain = %domain, error = %e, "DNS lookup error");
+                Ok(json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("DNS lookup error: {}", e)))
+            }
+        }
+    }
+
+    async fn enable_domain_ssl(&self, app_name: &str, domain: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Get domain record
+        let domain_record = match self.db.get_domain(domain)? {
+            Some(d) if d.app_name == app_name => d,
+            Some(_) => {
+                return Ok(json_error(StatusCode::FORBIDDEN, "Domain belongs to another app"));
+            }
+            None => {
+                return Ok(json_error(StatusCode::NOT_FOUND, "Domain not found"));
+            }
+        };
+
+        if !domain_record.verified {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Domain must be verified before enabling SSL"));
+        }
+
+        if domain_record.ssl_enabled {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "SSL is already enabled for this domain"));
+        }
+
+        // Provision SSL certificate
+        match self.ssl_manager.provision_certificate(domain).await {
+            Ok(cert_info) => {
+                // Update database
+                self.db.update_domain_ssl(
+                    domain,
+                    true,
+                    Some(&cert_info.cert_path),
+                    Some(&cert_info.key_path),
+                    Some(&cert_info.expires_at),
+                )?;
+
+                // Update in-memory manager
+                let _ = self.domain_manager.set_ssl_enabled(domain, true, Some(cert_info.expires_at.clone())).await;
+
+                info!(domain = %domain, "SSL enabled successfully");
+
+                let response = ApiResponse::ok(serde_json::json!({
+                    "domain": domain,
+                    "ssl_enabled": true,
+                    "cert_expires_at": cert_info.expires_at,
+                    "message": "SSL enabled! Your domain is now accessible via HTTPS."
+                }));
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            Err(e) => {
+                error!(domain = %domain, error = %e, "Failed to provision SSL certificate");
+                Ok(json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to provision SSL: {}", e)))
+            }
+        }
     }
 }
 

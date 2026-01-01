@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -99,6 +99,10 @@ impl Database {
 
             if current_version < 4 {
                 self.migrate_v4(&conn)?;
+            }
+
+            if current_version < 5 {
+                self.migrate_v5(&conn)?;
             }
         }
 
@@ -312,6 +316,36 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (4);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v5: Custom domains
+    fn migrate_v5(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v5: custom domains");
+
+        conn.execute_batch(r#"
+            -- Custom domains table
+            CREATE TABLE IF NOT EXISTS custom_domains (
+                domain TEXT PRIMARY KEY,
+                app_name TEXT NOT NULL,
+                verified INTEGER NOT NULL DEFAULT 0,
+                ssl_enabled INTEGER NOT NULL DEFAULT 0,
+                verification_token TEXT,
+                cert_path TEXT,
+                key_path TEXT,
+                cert_expires_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Index for looking up domains by app
+            CREATE INDEX IF NOT EXISTS idx_domains_app ON custom_domains(app_name);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (5);
         "#)?;
 
         Ok(())
@@ -622,69 +656,6 @@ impl Database {
         .collect::<Result<Vec<_>, _>>()?;
 
         Ok(deployments)
-    }
-
-    // ==================== Domain Operations ====================
-
-    /// Add a domain to an app
-    pub fn add_domain(&self, domain: &str, app_name: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO domains (domain, app_name) VALUES (?1, ?2)",
-            params![domain, app_name],
-        )?;
-        Ok(())
-    }
-
-    /// Get domains for an app
-    pub fn get_app_domains(&self, app_name: &str) -> Result<Vec<DomainRecord>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT domain, app_name, verified, ssl_enabled, created_at
-             FROM domains WHERE app_name = ?1"
-        )?;
-
-        let domains = stmt.query_map(params![app_name], |row| {
-            Ok(DomainRecord {
-                domain: row.get(0)?,
-                app_name: row.get(1)?,
-                verified: row.get(2)?,
-                ssl_enabled: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(domains)
-    }
-
-    /// Get app for a domain
-    pub fn get_domain_app(&self, domain: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT app_name FROM domains WHERE domain = ?1",
-            params![domain],
-            |row| row.get(0),
-        )
-        .optional()
-        .context("Failed to get domain app")
-    }
-
-    /// Update domain verification/SSL status
-    pub fn update_domain(&self, domain: &str, verified: bool, ssl_enabled: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE domains SET verified = ?1, ssl_enabled = ?2 WHERE domain = ?3",
-            params![verified, ssl_enabled, domain],
-        )?;
-        Ok(())
-    }
-
-    /// Delete a domain
-    pub fn delete_domain(&self, domain: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let rows = conn.execute("DELETE FROM domains WHERE domain = ?1", params![domain])?;
-        Ok(rows > 0)
     }
 
     // ==================== Scaling Operations ====================
@@ -1137,6 +1108,155 @@ impl Database {
         .optional()
         .context("Failed to get build status")
     }
+
+    // ==================== Custom Domains ====================
+
+    /// Add a custom domain to an app
+    pub fn add_domain(&self, domain: &str, app_name: &str, verification_token: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO custom_domains (domain, app_name, verification_token)
+             VALUES (?1, ?2, ?3)",
+            params![domain, app_name, verification_token],
+        )?;
+        Ok(())
+    }
+
+    /// Get a domain by name
+    pub fn get_domain(&self, domain: &str) -> Result<Option<CustomDomainRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT domain, app_name, verified, ssl_enabled, verification_token, cert_path, key_path, cert_expires_at, created_at
+             FROM custom_domains WHERE domain = ?1",
+            params![domain],
+            |row| {
+                Ok(CustomDomainRecord {
+                    domain: row.get(0)?,
+                    app_name: row.get(1)?,
+                    verified: row.get(2)?,
+                    ssl_enabled: row.get(3)?,
+                    verification_token: row.get(4)?,
+                    cert_path: row.get(5)?,
+                    key_path: row.get(6)?,
+                    cert_expires_at: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to get domain")
+    }
+
+    /// Get all domains for an app
+    pub fn get_app_domains(&self, app_name: &str) -> Result<Vec<CustomDomainRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT domain, app_name, verified, ssl_enabled, verification_token, cert_path, key_path, cert_expires_at, created_at
+             FROM custom_domains WHERE app_name = ?1 ORDER BY created_at"
+        )?;
+
+        let domains = stmt.query_map(params![app_name], |row| {
+            Ok(CustomDomainRecord {
+                domain: row.get(0)?,
+                app_name: row.get(1)?,
+                verified: row.get(2)?,
+                ssl_enabled: row.get(3)?,
+                verification_token: row.get(4)?,
+                cert_path: row.get(5)?,
+                key_path: row.get(6)?,
+                cert_expires_at: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(domains)
+    }
+
+    /// Get all custom domains
+    pub fn get_all_domains(&self) -> Result<Vec<CustomDomainRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT domain, app_name, verified, ssl_enabled, verification_token, cert_path, key_path, cert_expires_at, created_at
+             FROM custom_domains ORDER BY app_name, created_at"
+        )?;
+
+        let domains = stmt.query_map([], |row| {
+            Ok(CustomDomainRecord {
+                domain: row.get(0)?,
+                app_name: row.get(1)?,
+                verified: row.get(2)?,
+                ssl_enabled: row.get(3)?,
+                verification_token: row.get(4)?,
+                cert_path: row.get(5)?,
+                key_path: row.get(6)?,
+                cert_expires_at: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(domains)
+    }
+
+    /// Delete a domain
+    pub fn delete_domain(&self, domain: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM custom_domains WHERE domain = ?1",
+            params![domain],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Update domain verification status
+    pub fn update_domain_verification(&self, domain: &str, verified: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE custom_domains SET verified = ?1, updated_at = datetime('now') WHERE domain = ?2",
+            params![verified, domain],
+        )?;
+        Ok(())
+    }
+
+    /// Update domain SSL configuration
+    pub fn update_domain_ssl(&self, domain: &str, ssl_enabled: bool, cert_path: Option<&str>, key_path: Option<&str>, expires_at: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE custom_domains SET ssl_enabled = ?1, cert_path = ?2, key_path = ?3, cert_expires_at = ?4, updated_at = datetime('now') WHERE domain = ?5",
+            params![ssl_enabled, cert_path, key_path, expires_at, domain],
+        )?;
+        Ok(())
+    }
+
+    /// Find app by domain (for routing)
+    pub fn find_app_by_domain(&self, domain: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+
+        // First try exact match
+        if let Some(app_name) = conn.query_row(
+            "SELECT app_name FROM custom_domains WHERE domain = ?1 AND verified = 1",
+            params![domain],
+            |row| row.get::<_, String>(0),
+        ).optional()? {
+            return Ok(Some(app_name));
+        }
+
+        // Try wildcard match (e.g., *.example.com matches foo.example.com)
+        let parts: Vec<&str> = domain.splitn(2, '.').collect();
+        if parts.len() == 2 {
+            let wildcard = format!("*.{}", parts[1]);
+            if let Some(app_name) = conn.query_row(
+                "SELECT app_name FROM custom_domains WHERE domain = ?1 AND verified = 1",
+                params![wildcard],
+                |row| row.get::<_, String>(0),
+            ).optional()? {
+                return Ok(Some(app_name));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 // ==================== Record Types ====================
@@ -1201,13 +1321,27 @@ pub struct DeploymentRecord {
     pub finished_at: Option<String>,
 }
 
-/// Domain record from database
+/// Domain record from database (basic)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainRecord {
     pub domain: String,
     pub app_name: String,
     pub verified: bool,
     pub ssl_enabled: bool,
+    pub created_at: String,
+}
+
+/// Custom domain record with full details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomDomainRecord {
+    pub domain: String,
+    pub app_name: String,
+    pub verified: bool,
+    pub ssl_enabled: bool,
+    pub verification_token: Option<String>,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    pub cert_expires_at: Option<String>,
     pub created_at: String,
 }
 
@@ -1440,7 +1574,7 @@ mod tests {
         };
         db.create_addon(&addon).unwrap();
 
-        db.add_domain("example.com", "myapp").unwrap();
+        db.add_domain("example.com", "myapp", "verify-token-123").unwrap();
 
         // Delete app - should cascade to config, addons, domains
         db.delete_app("myapp").unwrap();

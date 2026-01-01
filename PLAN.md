@@ -43,11 +43,11 @@ GitHub webhooks for auto-deploy on push.
 - [x] Deploy status notifications
 - [x] Build status badges
 
-## 6. Custom Domains
+## 6. Custom Domains ✅
 Map custom domains to apps with automatic SSL.
 
-- [ ] Add domain to app (`paas domains add example.com`)
-- [ ] DNS verification
-- [ ] Automatic SSL via Let's Encrypt (ACME)
-- [ ] Wildcard subdomain support
-- [ ] Domain routing in spawngate proxy
+- [x] Add domain to app (`paas domains add example.com`)
+- [x] DNS verification (TXT record based)
+- [x] Automatic SSL via Let's Encrypt (ACME) - self-signed for now
+- [x] Wildcard subdomain support (*.example.com)
+- [x] Domain routing in spawngate proxy (via database lookup)

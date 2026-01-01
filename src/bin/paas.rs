@@ -117,6 +117,7 @@ enum Command {
     Restart(RestartOptions),
     Secrets(SecretsCommand),
     Webhooks(WebhooksCommand),
+    Domains(DomainsCommand),
     Help,
     Version,
 }
@@ -187,6 +188,15 @@ enum WebhooksCommand {
     },
     Disable,
     Events,
+}
+
+#[derive(Debug)]
+enum DomainsCommand {
+    Add { domain: String },
+    Remove { domain: String },
+    List,
+    Verify { domain: String },
+    Ssl { domain: String },
 }
 
 #[derive(Debug)]
@@ -335,6 +345,7 @@ fn run() -> Result<()> {
         Command::Restart(opts) => handle_restart(opts)?,
         Command::Secrets(cmd) => handle_secrets(cmd)?,
         Command::Webhooks(cmd) => handle_webhooks(cmd)?,
+        Command::Domains(cmd) => handle_domains(cmd)?,
     }
 
     Ok(())
@@ -359,6 +370,7 @@ fn parse_command(args: &[String]) -> Command {
         "restart" => parse_restart_command(&args[1..]),
         "secrets" | "secret" => parse_secrets_command(&args[1..]),
         "webhooks" | "webhook" => parse_webhooks_command(&args[1..]),
+        "domains" | "domain" => parse_domains_command(&args[1..]),
         _ => {
             // Check if it's a shorthand
             if args[0].starts_with("apps:") {
@@ -376,6 +388,10 @@ fn parse_command(args: &[String]) -> Command {
             if args[0].starts_with("webhooks:") {
                 let sub = args[0].strip_prefix("webhooks:").unwrap();
                 return parse_webhooks_command(&[sub.to_string()].iter().chain(&args[1..]).cloned().collect::<Vec<_>>());
+            }
+            if args[0].starts_with("domains:") {
+                let sub = args[0].strip_prefix("domains:").unwrap();
+                return parse_domains_command(&[sub.to_string()].iter().chain(&args[1..]).cloned().collect::<Vec<_>>());
             }
             Command::Help
         }
@@ -573,6 +589,33 @@ fn parse_webhooks_command(args: &[String]) -> Command {
         "disable" | "delete" | "remove" => Command::Webhooks(WebhooksCommand::Disable),
         "events" | "log" | "logs" | "history" => Command::Webhooks(WebhooksCommand::Events),
         _ => Command::Webhooks(WebhooksCommand::Show),
+    }
+}
+
+fn parse_domains_command(args: &[String]) -> Command {
+    if args.is_empty() {
+        return Command::Domains(DomainsCommand::List);
+    }
+
+    match args[0].as_str() {
+        "add" | "create" => {
+            let domain = args.get(1).cloned().unwrap_or_default();
+            Command::Domains(DomainsCommand::Add { domain })
+        }
+        "remove" | "rm" | "delete" => {
+            let domain = args.get(1).cloned().unwrap_or_default();
+            Command::Domains(DomainsCommand::Remove { domain })
+        }
+        "list" | "ls" => Command::Domains(DomainsCommand::List),
+        "verify" => {
+            let domain = args.get(1).cloned().unwrap_or_default();
+            Command::Domains(DomainsCommand::Verify { domain })
+        }
+        "ssl" | "cert" | "certificate" => {
+            let domain = args.get(1).cloned().unwrap_or_default();
+            Command::Domains(DomainsCommand::Ssl { domain })
+        }
+        _ => Command::Domains(DomainsCommand::List),
     }
 }
 
@@ -1672,6 +1715,168 @@ fn handle_webhooks(cmd: WebhooksCommand) -> Result<()> {
     Ok(())
 }
 
+fn handle_domains(cmd: DomainsCommand) -> Result<()> {
+    let client = ApiClient::new()?;
+    let current_app = get_current_app()?;
+
+    match cmd {
+        DomainsCommand::List => {
+            println!("Custom domains for {}:", current_app);
+            println!();
+
+            let response = client.get(&format!("/apps/{}/domains", current_app))?;
+            let result: ApiResponse<Vec<DomainRecord>> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(domains) = result.data {
+                    if domains.is_empty() {
+                        println!("  No custom domains configured.");
+                        println!();
+                        println!("Add a domain with:");
+                        println!("  paas domains add example.com");
+                    } else {
+                        println!("  {:<30} {:<10} {:<10}", "Domain", "Verified", "SSL");
+                        println!("  {}", "-".repeat(55));
+                        for domain in domains {
+                            let verified = if domain.verified { "✓" } else { "✗" };
+                            let ssl = if domain.ssl_enabled { "✓" } else { "-" };
+                            println!("  {:<30} {:<10} {:<10}", domain.domain, verified, ssl);
+                        }
+                    }
+                }
+            } else {
+                println!("Failed to fetch domains: {}", result.error.unwrap_or_default());
+            }
+        }
+        DomainsCommand::Add { domain } => {
+            if domain.is_empty() {
+                println!("Error: Domain name is required");
+                println!("Usage: paas domains add <domain>");
+                return Ok(());
+            }
+
+            println!("Adding domain {} to {}...", domain, current_app);
+            println!();
+
+            let body = serde_json::json!({
+                "domain": domain,
+            });
+
+            let response = client.post(&format!("/apps/{}/domains", current_app), &body.to_string())?;
+            let result: ApiResponse<DomainAddResponse> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(data) = result.data {
+                    println!("✓ Domain {} added!", domain);
+                    println!();
+                    println!("DNS Verification Required:");
+                    println!("  Add a TXT record to your DNS:");
+                    println!();
+                    println!("    Name:  _spawngate.{}", domain);
+                    println!("    Value: {}", data.verification_token.unwrap_or_default());
+                    println!();
+                    println!("Then verify with:");
+                    println!("  paas domains verify {}", domain);
+                }
+            } else {
+                println!("Failed to add domain: {}", result.error.unwrap_or_default());
+            }
+        }
+        DomainsCommand::Remove { domain } => {
+            if domain.is_empty() {
+                println!("Error: Domain name is required");
+                println!("Usage: paas domains remove <domain>");
+                return Ok(());
+            }
+
+            println!("Removing domain {} from {}...", domain, current_app);
+
+            let response = client.delete(&format!("/apps/{}/domains/{}", current_app, domain))?;
+            let result: ApiResponse<()> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!("✓ Domain {} removed", domain);
+            } else {
+                println!("Failed to remove domain: {}", result.error.unwrap_or_default());
+            }
+        }
+        DomainsCommand::Verify { domain } => {
+            if domain.is_empty() {
+                println!("Error: Domain name is required");
+                println!("Usage: paas domains verify <domain>");
+                return Ok(());
+            }
+
+            println!("Verifying domain {}...", domain);
+            println!();
+
+            let response = client.post(&format!("/apps/{}/domains/{}/verify", current_app, domain), "{}")?;
+            let result: ApiResponse<serde_json::Value> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!("✓ Domain {} verified!", domain);
+                println!();
+                println!("You can now enable SSL with:");
+                println!("  paas domains ssl {}", domain);
+            } else {
+                println!("✗ Verification failed: {}", result.error.unwrap_or_default());
+            }
+        }
+        DomainsCommand::Ssl { domain } => {
+            if domain.is_empty() {
+                println!("Error: Domain name is required");
+                println!("Usage: paas domains ssl <domain>");
+                return Ok(());
+            }
+
+            println!("Enabling SSL for {}...", domain);
+            println!();
+
+            let response = client.post(&format!("/apps/{}/domains/{}/ssl", current_app, domain), "{}")?;
+            let result: ApiResponse<serde_json::Value> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                if let Some(data) = result.data {
+                    println!("✓ SSL enabled for {}!", domain);
+                    if let Some(expires) = data.get("cert_expires_at").and_then(|v| v.as_str()) {
+                        println!("  Certificate expires: {}", expires);
+                    }
+                    println!();
+                    println!("Your domain is now accessible via HTTPS.");
+                }
+            } else {
+                println!("Failed to enable SSL: {}", result.error.unwrap_or_default());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct DomainRecord {
+    domain: String,
+    verified: bool,
+    ssl_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DomainAddResponse {
+    domain: String,
+    #[allow(dead_code)]
+    app_name: String,
+    #[allow(dead_code)]
+    verified: bool,
+    #[allow(dead_code)]
+    ssl_enabled: bool,
+    verification_token: Option<String>,
+}
+
 fn print_help() {
     println!(r#"
 paas - Your own Heroku (with Docker support)
@@ -1713,6 +1918,12 @@ COMMANDS:
     webhooks enable          Enable GitHub/GitLab webhooks
     webhooks disable         Disable webhooks
     webhooks events          Show recent webhook events
+
+    domains list             List custom domains
+    domains add <domain>     Add a custom domain
+    domains remove <domain>  Remove a custom domain
+    domains verify <domain>  Verify domain ownership via DNS
+    domains ssl <domain>     Enable SSL for a domain
 
 BUILD MODES (auto-detected):
     Dockerfile               docker build (highest priority)
