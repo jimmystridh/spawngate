@@ -226,15 +226,22 @@ done
         let commit = Self::get_head_commit(&repo.repo_path).await?;
         info!(app = %app_name, commit = %commit, "Building app");
 
-        // Build
+        // Build with auto-detection (Dockerfile > docker-compose > buildpack)
         let config = BuildConfig {
             app_name: app_name.to_string(),
             source_path: repo.work_path.clone(),
+            build_mode: crate::builder::BuildMode::Auto,
+            dockerfile: None,
+            target: None,
+            build_args: HashMap::new(),
             builder: String::new(),
             buildpacks: vec![],
             build_env: HashMap::new(),
             registry: self.config.registry.clone(),
+            tag: "latest".to_string(),
             clear_cache: false,
+            platform: None,
+            image: None,
         };
 
         let result = self.builder.build(&config).await?;

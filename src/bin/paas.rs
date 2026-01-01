@@ -431,37 +431,88 @@ fn handle_deploy(opts: DeployOptions) -> Result<()> {
     println!("Deploying {} from {}...", current_app, path.display());
     println!();
 
-    // Detect app type
+    // Detect build mode
+    println!("Detecting build mode...");
+
+    // Check for Dockerfile first (highest priority)
+    if path.join("Dockerfile").exists() {
+        println!("  Found: Dockerfile");
+        println!("  Build: docker build");
+        println!();
+
+        if opts.build_only {
+            println!("Building image...");
+            println!();
+            println!("  docker build -t {}:latest {}", current_app, path.display());
+        } else {
+            println!("Deploy with:");
+            println!("  git push paas main");
+            println!();
+            println!("Or build locally:");
+            println!("  docker build -t {}:latest {}", current_app, path.display());
+        }
+        return Ok(());
+    }
+
+    // Check for docker-compose
+    let compose_files = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
+    for compose_file in &compose_files {
+        if path.join(compose_file).exists() {
+            println!("  Found: {}", compose_file);
+            println!("  Build: docker compose");
+            println!();
+
+            if opts.build_only {
+                println!("Building services...");
+                println!();
+                println!("  docker compose -f {} build", compose_file);
+            } else {
+                println!("Deploy with:");
+                println!("  git push paas main");
+                println!();
+                println!("Or run locally:");
+                println!("  docker compose -f {} up -d", compose_file);
+            }
+            return Ok(());
+        }
+    }
+
+    // Fall back to buildpack detection
+    println!("  No Dockerfile found, using buildpacks");
+    println!();
+
+    // Detect app type for buildpacks
     println!("Detecting app type...");
     if path.join("package.json").exists() {
-        println!("  Detected: Node.js");
-    } else if path.join("requirements.txt").exists() {
-        println!("  Detected: Python");
+        println!("  Detected: Node.js (paketo-buildpacks/nodejs)");
+    } else if path.join("requirements.txt").exists() || path.join("pyproject.toml").exists() {
+        println!("  Detected: Python (paketo-buildpacks/python)");
     } else if path.join("Gemfile").exists() {
-        println!("  Detected: Ruby");
+        println!("  Detected: Ruby (paketo-buildpacks/ruby)");
     } else if path.join("go.mod").exists() {
-        println!("  Detected: Go");
+        println!("  Detected: Go (paketo-buildpacks/go)");
     } else if path.join("Cargo.toml").exists() {
-        println!("  Detected: Rust");
+        println!("  Detected: Rust (paketo-community/rust)");
+    } else if path.join("pom.xml").exists() || path.join("build.gradle").exists() {
+        println!("  Detected: Java (paketo-buildpacks/java)");
     } else {
         println!("  Could not detect app type");
         println!("  Will use auto-detection during build");
+        println!();
+        println!("Tip: Add a Dockerfile for more control over the build");
     }
     println!();
 
     if opts.build_only {
-        println!("Building image (not deploying)...");
+        println!("Building image...");
         println!();
-        println!("Build commands:");
         println!("  pack build {}:latest --builder paketobuildpacks/builder-jammy-base --path {}",
             current_app, path.display());
     } else {
-        println!("Pushing to git remote...");
-        println!();
-        println!("Run:");
+        println!("Deploy with:");
         println!("  git push paas main");
         println!();
-        println!("Or deploy directly with:");
+        println!("Or build locally:");
         println!("  pack build {}:latest --builder paketobuildpacks/builder-jammy-base --path {}",
             current_app, path.display());
     }
@@ -564,7 +615,7 @@ fn handle_init(opts: InitOptions) -> Result<()> {
 
 fn print_help() {
     println!(r#"
-paas - Your own Heroku
+paas - Your own Heroku (with Docker support)
 
 USAGE:
     paas <command> [options]
@@ -585,6 +636,11 @@ COMMANDS:
     config list              List environment variables
     config set <key> <val>   Set environment variable
     config get <key>         Get environment variable
+
+BUILD MODES (auto-detected):
+    Dockerfile               docker build (highest priority)
+    docker-compose.yml       docker compose build
+    Buildpacks               pack build (Node, Python, Go, etc.)
 
     help                     Show this help
     version                  Show version

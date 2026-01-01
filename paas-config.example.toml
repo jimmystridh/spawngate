@@ -1,5 +1,10 @@
 # Spawngate PaaS Configuration Example
 # This configuration file shows how to set up spawngate as your own Heroku-like PaaS
+#
+# BUILD MODES (auto-detected in order of priority):
+# 1. Dockerfile        - Uses `docker build` (most flexible)
+# 2. docker-compose    - Uses `docker compose build` (multi-container apps)
+# 3. Buildpacks        - Uses `pack build` (zero-config for common languages)
 
 [server]
 port = 80                      # HTTP port for apps
