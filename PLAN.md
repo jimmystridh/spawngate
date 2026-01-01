@@ -66,3 +66,74 @@ Auto-detect language and build apps without Dockerfile.
 - [x] Framework detection (Express, Next.js, Flask, FastAPI, Django, Rails, etc.)
 - [x] Automatic Dockerfile generation
 - [x] Extensive integration tests (34 tests)
+
+## 8. Extensive Web Control Panel
+Full-featured web UI for managing the PaaS platform.
+
+### Phase 1: Authentication & Core UI
+- [ ] User authentication system (JWT-based)
+- [ ] Session management with secure cookies
+- [ ] Modern responsive UI framework (Tailwind CSS)
+- [ ] Dark/light theme support
+- [ ] Navigation with breadcrumbs
+
+### Phase 2: App Management
+- [ ] App dashboard with status cards
+- [ ] Create app wizard
+- [ ] App settings page
+- [ ] Environment variables editor (with secret masking)
+- [ ] Delete app with confirmation
+
+### Phase 3: Deployments & Logs
+- [ ] Real-time deployment progress
+- [ ] Deployment history with diffs
+- [ ] One-click rollback
+- [ ] Live log streaming (WebSocket)
+- [ ] Log search and filtering
+- [ ] Log download
+
+### Phase 4: Scaling & Processes
+- [ ] Visual dyno manager (slider/input)
+- [ ] Process type cards (web, worker, etc.)
+- [ ] Restart/stop individual dynos
+- [ ] Resource usage graphs (CPU, memory)
+- [ ] Formation editor
+
+### Phase 5: Domains & SSL
+- [ ] Domain list with status badges
+- [ ] Add domain wizard
+- [ ] DNS verification helper
+- [ ] SSL certificate status
+- [ ] Auto-renew indicators
+
+### Phase 6: Add-ons & Services
+- [ ] Add-on marketplace view
+- [ ] One-click add-on provisioning
+- [ ] Add-on credentials (with copy button)
+- [ ] Usage metrics per add-on
+
+### Phase 7: Webhooks & CI
+- [ ] Webhook configuration UI
+- [ ] GitHub/GitLab integration wizard
+- [ ] Webhook event log
+- [ ] Build status badges preview
+- [ ] Deploy key management
+
+### Phase 8: Secrets & Security
+- [ ] Secrets manager with audit log
+- [ ] Key rotation UI
+- [ ] Access audit trail
+- [ ] API token management
+
+### Phase 9: Metrics & Monitoring
+- [ ] Request rate graphs
+- [ ] Response time percentiles
+- [ ] Error rate visualization
+- [ ] Memory/CPU charts (per dyno)
+- [ ] Alerting rules (future)
+
+### Phase 10: Activity & Notifications
+- [ ] Activity feed (all actions)
+- [ ] Filterable event log
+- [ ] User action attribution
+- [ ] Email/webhook notifications (future)
