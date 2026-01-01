@@ -10,6 +10,7 @@ use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord};
 use crate::docker::DockerManager;
 use crate::dyno::{DynoConfig, DynoManager};
 use crate::git::{GitServer, GitServerConfig};
+use crate::healthcheck::{HealthCheckConfig, HealthChecker};
 use crate::loadbalancer::LoadBalancerManager;
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
@@ -174,6 +175,7 @@ pub struct PlatformApi {
     builder: Arc<Builder>,
     git_server: Arc<GitServer>,
     dyno_manager: Arc<DynoManager>,
+    load_balancer: Arc<LoadBalancerManager>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -234,6 +236,7 @@ impl PlatformApi {
             builder: Arc::new(builder),
             git_server: Arc::new(git_server),
             dyno_manager: Arc::new(dyno_manager),
+            load_balancer,
             shutdown_rx,
         })
     }
@@ -242,6 +245,17 @@ impl PlatformApi {
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let listener = TcpListener::bind(self.config.bind_addr).await?;
         info!(addr = %self.config.bind_addr, "Platform API server listening");
+
+        // Start health checker in background
+        let health_checker = HealthChecker::new(
+            Arc::clone(&self.db),
+            Arc::clone(&self.load_balancer),
+            HealthCheckConfig::default(),
+            self.shutdown_rx.clone(),
+        );
+        tokio::spawn(async move {
+            health_checker.run().await;
+        });
 
         let mut shutdown_rx = self.shutdown_rx.clone();
 

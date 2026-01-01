@@ -23,7 +23,7 @@ Run multiple instances of an app with load balancing.
 - [x] Add `scale` command to CLI (`paas scale web=3`)
 - [x] Spawn multiple containers per app
 - [x] Integrate with spawngate proxy for load balancing
-- [ ] Health checks for each instance
+- [x] Health checks for each instance
 - [ ] Rolling deploys
 
 ## 4. Secrets Management

@@ -24,6 +24,7 @@ pub mod docker;
 pub mod dyno;
 pub mod error;
 pub mod git;
+pub mod healthcheck;
 pub mod loadbalancer;
 pub mod pool;
 pub mod process;
