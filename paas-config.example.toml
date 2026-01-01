@@ -1,0 +1,106 @@
+# Spawngate PaaS Configuration Example
+# This configuration file shows how to set up spawngate as your own Heroku-like PaaS
+
+[server]
+port = 80                      # HTTP port for apps
+tls_port = 443                 # HTTPS port
+bind = "0.0.0.0"
+admin_port = 9999              # Internal admin API
+admin_token = "your-secret-token"
+
+# Enable automatic HTTPS with Let's Encrypt
+[server.acme]
+enabled = true
+domains = ["myapp.example.com", "api.example.com"]
+email = "admin@example.com"
+cache_dir = "./acme_cache"
+
+[defaults]
+idle_timeout_secs = 600        # Scale to zero after 10 minutes
+startup_timeout_secs = 120     # Allow up to 2 minutes for build containers
+health_path = "/health"
+
+# ============================================================================
+# APPLICATIONS
+# Each backend is an application deployed via buildpacks
+# ============================================================================
+
+# Node.js Application
+# Deploy with: git push paas main
+[backends."myapp.example.com"]
+type = "docker"
+image = "myapp:latest"         # Built by buildpacks from your source
+port = 3000
+idle_timeout_secs = 300        # Scale to zero after 5 minutes
+
+# Environment variables (including add-on connections)
+[backends."myapp.example.com".env]
+NODE_ENV = "production"
+# These are injected automatically by add-ons:
+# DATABASE_URL = "postgres://..."     # From postgres add-on
+# REDIS_URL = "redis://..."           # From redis add-on
+# S3_ENDPOINT = "http://minio:9000"   # From storage add-on
+
+# Python API Application
+[backends."api.example.com"]
+type = "docker"
+image = "api:latest"
+port = 8000
+memory = "512m"
+cpus = "1.0"
+
+[backends."api.example.com".env]
+PYTHON_ENV = "production"
+DEBUG = "false"
+
+# Static Site (built with buildpacks)
+[backends."www.example.com"]
+type = "docker"
+image = "www:latest"
+port = 8080
+idle_timeout_secs = 900        # 15 minutes - static sites can idle longer
+
+# ============================================================================
+# ADD-ONS CONFIGURATION
+# These are managed by the AddonManager and provisioned automatically
+# ============================================================================
+
+# To add add-ons, use the CLI:
+#   paas addons add postgres --plan hobby
+#   paas addons add redis --plan basic
+#   paas addons add storage
+#
+# Available add-on types:
+#   postgres   - PostgreSQL database (postgres:16-alpine)
+#   redis      - Redis cache/queue (redis:7-alpine)
+#   storage    - S3-compatible storage (minio/minio:latest)
+#
+# Available plans:
+#   hobby      - 256MB RAM, 0.25 CPU (development)
+#   basic      - 512MB RAM, 0.5 CPU (small production)
+#   standard   - 1GB RAM, 1 CPU (standard production)
+#   premium    - 2GB RAM, 2 CPU (high-performance)
+
+# ============================================================================
+# HOW TO USE
+# ============================================================================
+
+# 1. Start spawngate with this config:
+#    spawngate paas-config.toml
+#
+# 2. Create an app:
+#    paas apps create myapp
+#
+# 3. Add a git remote:
+#    git remote add paas git@localhost:2222/myapp.git
+#
+# 4. Add add-ons:
+#    paas addons add postgres
+#    paas addons add redis
+#
+# 5. Deploy:
+#    git push paas main
+#
+# Your app will be built using Cloud Native Buildpacks and deployed
+# automatically. Database URLs and other add-on credentials are
+# injected as environment variables.

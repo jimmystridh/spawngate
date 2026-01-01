@@ -8,12 +8,18 @@
 //! - Automatically shuts down idle backends after a configurable timeout
 //! - Uses connection pooling for efficient backend communication
 //! - Supports automatic TLS via ACME/Let's Encrypt
+//! - Provides add-on services (PostgreSQL, Redis, S3-compatible storage)
+//! - Builds apps from source using Cloud Native Buildpacks
+//! - Supports git push deployment workflow
 
 pub mod acme;
+pub mod addons;
 pub mod admin;
+pub mod builder;
 pub mod config;
 pub mod docker;
 pub mod error;
+pub mod git;
 pub mod pool;
 pub mod process;
 pub mod proxy;

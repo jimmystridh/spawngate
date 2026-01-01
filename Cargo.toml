@@ -4,7 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "A serverless-style reverse proxy that spawns backends on demand"
 
+[[bin]]
+name = "spawngate"
+path = "src/main.rs"
+
+[[bin]]
+name = "paas"
+path = "src/bin/paas.rs"
+
 [dependencies]
+# CLI utilities
+dirs-next = "2.0"
 # Async runtime
 tokio = { version = "1", features = ["full", "process", "signal"] }
 
@@ -56,3 +66,4 @@ base64 = "0.22"
 h2 = "0.4"
 http = "1"
 rustls-pemfile = "2"
+tempfile = "3"

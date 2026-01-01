@@ -21,6 +21,11 @@ pub struct DockerManager {
 }
 
 impl DockerManager {
+    /// Get the underlying Docker client for direct API access
+    pub fn client(&self) -> &Docker {
+        &self.client
+    }
+
     /// Create a new DockerManager connecting to the Docker daemon
     ///
     /// Connection priority:
