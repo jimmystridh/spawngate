@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -89,8 +89,9 @@ impl Database {
                 self.migrate_v1(&conn)?;
             }
 
-            // Add future migrations here:
-            // if current_version < 2 { self.migrate_v2(&conn)?; }
+            if current_version < 2 {
+                self.migrate_v2(&conn)?;
+            }
         }
 
         Ok(())
@@ -179,6 +180,42 @@ impl Database {
         Ok(())
     }
 
+    /// Migration v2: Add scaling support
+    fn migrate_v2(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v2: scaling support");
+
+        conn.execute_batch(r#"
+            -- Add scaling columns to apps
+            ALTER TABLE apps ADD COLUMN scale INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE apps ADD COLUMN min_scale INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE apps ADD COLUMN max_scale INTEGER NOT NULL DEFAULT 10;
+
+            -- App processes (running instances)
+            CREATE TABLE IF NOT EXISTS app_processes (
+                id TEXT PRIMARY KEY,
+                app_name TEXT NOT NULL,
+                process_type TEXT NOT NULL DEFAULT 'web',
+                container_id TEXT,
+                container_name TEXT,
+                port INTEGER,
+                status TEXT NOT NULL DEFAULT 'starting',
+                health_status TEXT DEFAULT 'unknown',
+                last_health_check TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Create indexes
+            CREATE INDEX IF NOT EXISTS idx_app_processes_app ON app_processes(app_name);
+            CREATE INDEX IF NOT EXISTS idx_app_processes_status ON app_processes(status);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (2);
+        "#)?;
+
+        Ok(())
+    }
+
     // ==================== App Operations ====================
 
     /// Create a new app
@@ -195,7 +232,8 @@ impl Database {
     pub fn get_app(&self, name: &str) -> Result<Option<AppRecord>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT name, status, git_url, image, port, created_at, deployed_at, commit_hash
+            "SELECT name, status, git_url, image, port, created_at, deployed_at, commit_hash,
+                    COALESCE(scale, 1), COALESCE(min_scale, 0), COALESCE(max_scale, 10)
              FROM apps WHERE name = ?1",
             params![name],
             |row| {
@@ -208,6 +246,9 @@ impl Database {
                     created_at: row.get(5)?,
                     deployed_at: row.get(6)?,
                     commit_hash: row.get(7)?,
+                    scale: row.get(8)?,
+                    min_scale: row.get(9)?,
+                    max_scale: row.get(10)?,
                 })
             },
         )
@@ -219,7 +260,8 @@ impl Database {
     pub fn list_apps(&self) -> Result<Vec<AppRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT name, status, git_url, image, port, created_at, deployed_at, commit_hash
+            "SELECT name, status, git_url, image, port, created_at, deployed_at, commit_hash,
+                    COALESCE(scale, 1), COALESCE(min_scale, 0), COALESCE(max_scale, 10)
              FROM apps ORDER BY created_at DESC"
         )?;
 
@@ -233,6 +275,9 @@ impl Database {
                 created_at: row.get(5)?,
                 deployed_at: row.get(6)?,
                 commit_hash: row.get(7)?,
+                scale: row.get(8)?,
+                min_scale: row.get(9)?,
+                max_scale: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -540,6 +585,119 @@ impl Database {
         let rows = conn.execute("DELETE FROM domains WHERE domain = ?1", params![domain])?;
         Ok(rows > 0)
     }
+
+    // ==================== Scaling Operations ====================
+
+    /// Update app scale
+    pub fn update_app_scale(&self, name: &str, scale: i32) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE apps SET scale = ?1 WHERE name = ?2",
+            params![scale, name],
+        )?;
+        Ok(())
+    }
+
+    /// Get app scale
+    pub fn get_app_scale(&self, name: &str) -> Result<Option<i32>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(scale, 1) FROM apps WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to get app scale")
+    }
+
+    // ==================== Process Operations ====================
+
+    /// Create a process record
+    pub fn create_process(&self, process: &ProcessRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_processes (id, app_name, process_type, container_id, container_name, port, status, health_status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                process.id, process.app_name, process.process_type,
+                process.container_id, process.container_name, process.port,
+                process.status, process.health_status
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get processes for an app
+    pub fn get_app_processes(&self, app_name: &str) -> Result<Vec<ProcessRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, process_type, container_id, container_name, port, status, health_status, last_health_check, started_at
+             FROM app_processes WHERE app_name = ?1 ORDER BY started_at DESC"
+        )?;
+
+        let processes = stmt.query_map(params![app_name], |row| {
+            Ok(ProcessRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                process_type: row.get(2)?,
+                container_id: row.get(3)?,
+                container_name: row.get(4)?,
+                port: row.get(5)?,
+                status: row.get(6)?,
+                health_status: row.get(7)?,
+                last_health_check: row.get(8)?,
+                started_at: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(processes)
+    }
+
+    /// Get running process count for an app
+    pub fn get_running_process_count(&self, app_name: &str) -> Result<i32> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM app_processes WHERE app_name = ?1 AND status = 'running'",
+            params![app_name],
+            |row| row.get(0),
+        )
+        .context("Failed to count processes")
+    }
+
+    /// Update process status
+    pub fn update_process_status(&self, id: &str, status: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE app_processes SET status = ?1 WHERE id = ?2",
+            params![status, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update process health status
+    pub fn update_process_health(&self, id: &str, health_status: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE app_processes SET health_status = ?1, last_health_check = datetime('now') WHERE id = ?2",
+            params![health_status, id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a process record
+    pub fn delete_process(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute("DELETE FROM app_processes WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
+
+    /// Delete all processes for an app
+    pub fn delete_app_processes(&self, app_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM app_processes WHERE app_name = ?1", params![app_name])?;
+        Ok(())
+    }
 }
 
 // ==================== Record Types ====================
@@ -555,6 +713,24 @@ pub struct AppRecord {
     pub created_at: String,
     pub deployed_at: Option<String>,
     pub commit_hash: Option<String>,
+    pub scale: i32,
+    pub min_scale: i32,
+    pub max_scale: i32,
+}
+
+/// Process (running instance) record from database
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessRecord {
+    pub id: String,
+    pub app_name: String,
+    pub process_type: String,
+    pub container_id: Option<String>,
+    pub container_name: Option<String>,
+    pub port: Option<i32>,
+    pub status: String,
+    pub health_status: Option<String>,
+    pub last_health_check: Option<String>,
+    pub started_at: String,
 }
 
 /// Addon record from database
@@ -613,6 +789,9 @@ mod tests {
             created_at: String::new(),
             deployed_at: None,
             commit_hash: None,
+            scale: 1,
+            min_scale: 0,
+            max_scale: 10,
         };
 
         db.create_app(&app).unwrap();
@@ -637,6 +816,9 @@ mod tests {
                 created_at: String::new(),
                 deployed_at: None,
                 commit_hash: None,
+                scale: 1,
+                min_scale: 0,
+                max_scale: 10,
             };
             db.create_app(&app).unwrap();
         }
@@ -658,6 +840,9 @@ mod tests {
             created_at: String::new(),
             deployed_at: None,
             commit_hash: None,
+            scale: 1,
+            min_scale: 0,
+            max_scale: 10,
         };
         db.create_app(&app).unwrap();
 
@@ -688,6 +873,9 @@ mod tests {
             created_at: String::new(),
             deployed_at: None,
             commit_hash: None,
+            scale: 1,
+            min_scale: 0,
+            max_scale: 10,
         };
         db.create_app(&app).unwrap();
 
@@ -729,6 +917,9 @@ mod tests {
             created_at: String::new(),
             deployed_at: None,
             commit_hash: None,
+            scale: 1,
+            min_scale: 0,
+            max_scale: 10,
         };
         db.create_app(&app).unwrap();
 
@@ -772,6 +963,9 @@ mod tests {
             created_at: String::new(),
             deployed_at: None,
             commit_hash: None,
+            scale: 1,
+            min_scale: 0,
+            max_scale: 10,
         };
         db.create_app(&app).unwrap();
 

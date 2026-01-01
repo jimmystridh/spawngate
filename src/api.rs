@@ -70,6 +70,7 @@ pub struct App {
     pub created_at: String,
     pub deployed_at: Option<String>,
     pub commit: Option<String>,
+    pub scale: i32,
 }
 
 impl App {
@@ -85,8 +86,15 @@ impl App {
             created_at: record.created_at,
             deployed_at: record.deployed_at,
             commit: record.commit_hash,
+            scale: record.scale,
         }
     }
+}
+
+/// Request to scale an app
+#[derive(Debug, Deserialize)]
+pub struct ScaleRequest {
+    pub scale: i32,
 }
 
 /// Request to create a new app
@@ -377,6 +385,16 @@ impl PlatformApi {
                 self.list_deployments(app_name).await
             }
 
+            // Scale
+            (Method::POST, path) if path.ends_with("/scale") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/scale")).unwrap_or("");
+                self.scale_app(app_name, req).await
+            }
+            (Method::GET, path) if path.ends_with("/processes") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/processes")).unwrap_or("");
+                self.list_processes(app_name).await
+            }
+
             // Logs
             (Method::GET, path) if path.ends_with("/logs") => {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/logs")).unwrap_or("");
@@ -461,6 +479,9 @@ impl PlatformApi {
             created_at: String::new(), // Will be set by database
             deployed_at: None,
             commit_hash: None,
+            scale: 1,
+            min_scale: 0,
+            max_scale: 10,
         };
 
         self.db.create_app(&record)?;
@@ -907,6 +928,61 @@ impl PlatformApi {
         });
 
         let response = ApiResponse::ok(info);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    // ==================== Scaling ====================
+
+    async fn scale_app(
+        self: Arc<Self>,
+        app_name: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        let app = match self.db.get_app(app_name)? {
+            Some(app) => app,
+            None => return Ok(json_error(StatusCode::NOT_FOUND, "App not found")),
+        };
+
+        let body = req.collect().await?.to_bytes();
+        let scale_req: ScaleRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)));
+            }
+        };
+
+        // Validate scale
+        if scale_req.scale < 0 || scale_req.scale > app.max_scale {
+            return Ok(json_error(
+                StatusCode::BAD_REQUEST,
+                format!("Scale must be between 0 and {}", app.max_scale),
+            ));
+        }
+
+        info!(app = %app_name, scale = scale_req.scale, "Scaling app");
+
+        // Update scale in database
+        self.db.update_app_scale(app_name, scale_req.scale)?;
+
+        let result = serde_json::json!({
+            "app": app_name,
+            "scale": scale_req.scale,
+            "previous_scale": app.scale,
+        });
+
+        let response = ApiResponse::ok(result);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn list_processes(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let processes = self.db.get_app_processes(app_name)?;
+        let response = ApiResponse::ok(processes);
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
 }

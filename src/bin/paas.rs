@@ -72,6 +72,12 @@ struct App {
     created_at: String,
     deployed_at: Option<String>,
     commit: Option<String>,
+    #[serde(default = "default_scale")]
+    scale: i32,
+}
+
+fn default_scale() -> i32 {
+    1
 }
 
 /// Add-on instance from API
@@ -106,6 +112,8 @@ enum Command {
     Logs(LogsOptions),
     Config(ConfigCommand),
     Init(InitOptions),
+    Scale(ScaleOptions),
+    Ps(PsOptions),
     Help,
     Version,
 }
@@ -154,6 +162,32 @@ enum ConfigCommand {
 #[derive(Debug)]
 struct InitOptions {
     name: Option<String>,
+}
+
+#[derive(Debug)]
+struct ScaleOptions {
+    /// Process type and count, e.g., "web=3"
+    formations: Vec<(String, i32)>,
+    /// Just show current scale without changing
+    show_only: bool,
+}
+
+#[derive(Debug)]
+struct PsOptions {
+    /// App name (defaults to current app)
+    app: Option<String>,
+}
+
+/// Process info from API
+#[derive(Debug, Deserialize)]
+struct ProcessInfo {
+    id: String,
+    process_type: String,
+    status: String,
+    container_id: Option<String>,
+    port: Option<i32>,
+    started_at: String,
+    health_status: Option<String>,
 }
 
 /// Simple HTTP client for API calls
@@ -266,6 +300,8 @@ fn run() -> Result<()> {
         Command::Logs(opts) => handle_logs(opts)?,
         Command::Config(cmd) => handle_config(cmd)?,
         Command::Init(opts) => handle_init(opts)?,
+        Command::Scale(opts) => handle_scale(opts)?,
+        Command::Ps(opts) => handle_ps(opts)?,
     }
 
     Ok(())
@@ -285,6 +321,8 @@ fn parse_command(args: &[String]) -> Command {
         "logs" | "log" => parse_logs_command(&args[1..]),
         "config" => parse_config_command(&args[1..]),
         "init" | "create" => parse_init_command(&args[1..]),
+        "scale" => parse_scale_command(&args[1..]),
+        "ps" | "processes" => parse_ps_command(&args[1..]),
         _ => {
             // Check if it's a shorthand
             if args[0].starts_with("apps:") {
@@ -393,6 +431,39 @@ fn parse_config_command(args: &[String]) -> Command {
 fn parse_init_command(args: &[String]) -> Command {
     let name = args.get(0).filter(|s| !s.starts_with('-')).cloned();
     Command::Init(InitOptions { name })
+}
+
+fn parse_scale_command(args: &[String]) -> Command {
+    if args.is_empty() {
+        return Command::Scale(ScaleOptions {
+            formations: vec![],
+            show_only: true,
+        });
+    }
+
+    let mut formations = Vec::new();
+    for arg in args {
+        if arg.starts_with('-') {
+            continue;
+        }
+        // Parse "web=3" format
+        if let Some(idx) = arg.find('=') {
+            let process_type = arg[..idx].to_string();
+            if let Ok(count) = arg[idx + 1..].parse::<i32>() {
+                formations.push((process_type, count));
+            }
+        }
+    }
+
+    Command::Scale(ScaleOptions {
+        formations,
+        show_only: false,
+    })
+}
+
+fn parse_ps_command(args: &[String]) -> Command {
+    let app = args.get(0).filter(|s| !s.starts_with('-')).cloned();
+    Command::Ps(PsOptions { app })
 }
 
 fn handle_apps(cmd: AppsCommand) -> Result<()> {
@@ -998,6 +1069,118 @@ fn handle_init(opts: InitOptions) -> Result<()> {
     Ok(())
 }
 
+fn handle_scale(opts: ScaleOptions) -> Result<()> {
+    let client = ApiClient::new()?;
+    let current_app = get_current_app()?;
+
+    if opts.show_only || opts.formations.is_empty() {
+        // Just show current scale
+        let response = client.get(&format!("/apps/{}", current_app))?;
+        let result: ApiResponse<App> = serde_json::from_str(&response)
+            .context("Failed to parse API response")?;
+
+        if result.success {
+            if let Some(app) = result.data {
+                println!("Formation for {}:", current_app);
+                println!();
+                println!("  web: {}", app.scale);
+                println!();
+                println!("Use 'paas scale web=N' to change dyno count");
+            }
+        } else {
+            println!("Failed to get app info: {}", result.error.unwrap_or_default());
+        }
+    } else {
+        // Set new scale
+        for (process_type, count) in &opts.formations {
+            if *count < 0 {
+                println!("Error: scale count cannot be negative");
+                return Ok(());
+            }
+            if *count > 100 {
+                println!("Error: scale count cannot exceed 100");
+                return Ok(());
+            }
+
+            println!("Scaling {} to {} {}...", current_app, count, process_type);
+
+            let body = serde_json::json!({
+                "scale": count
+            });
+
+            let response = client.post(&format!("/apps/{}/scale", current_app), &body.to_string())?;
+            let result: ApiResponse<()> = serde_json::from_str(&response)
+                .context("Failed to parse API response")?;
+
+            if result.success {
+                println!();
+                if *count == 0 {
+                    println!("App {} scaled down to 0 dynos (idle)", current_app);
+                    println!("The app will start when it receives traffic");
+                } else {
+                    println!("App {} scaled to {} {} {}",
+                        current_app,
+                        count,
+                        process_type,
+                        if *count == 1 { "dyno" } else { "dynos" }
+                    );
+                }
+            } else {
+                println!("Failed to scale: {}", result.error.unwrap_or_default());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_ps(opts: PsOptions) -> Result<()> {
+    let client = ApiClient::new()?;
+    let app = opts.app.unwrap_or_else(|| get_current_app().unwrap_or_default());
+
+    if app.is_empty() {
+        println!("Usage: paas ps [app]");
+        return Ok(());
+    }
+
+    println!("Processes for {}:", app);
+    println!();
+
+    let response = client.get(&format!("/apps/{}/processes", app))?;
+    let result: ApiResponse<Vec<ProcessInfo>> = serde_json::from_str(&response)
+        .context("Failed to parse API response")?;
+
+    if result.success {
+        if let Some(processes) = result.data {
+            if processes.is_empty() {
+                println!("  No processes running.");
+                println!();
+                println!("  Your app may be idle. Send a request to wake it up.");
+            } else {
+                println!("  ID                 TYPE   STATUS    HEALTH    PORT");
+                println!("  ──────────────────────────────────────────────────");
+                for proc in &processes {
+                    let health = proc.health_status.as_deref().unwrap_or("unknown");
+                    let port = proc.port.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+                    println!("  {:18} {:6} {:9} {:9} {}",
+                        &proc.id[..std::cmp::min(18, proc.id.len())],
+                        proc.process_type,
+                        proc.status,
+                        health,
+                        port
+                    );
+                }
+                println!();
+                println!("  Total: {} running", processes.len());
+            }
+        }
+    } else {
+        println!("Failed to get processes: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(r#"
 paas - Your own Heroku (with Docker support)
@@ -1015,6 +1198,9 @@ COMMANDS:
     addons add <type>        Add an add-on (postgres, redis, storage)
     addons remove <type>     Remove an add-on
     addons list              List add-ons for current app
+
+    scale [type=N ...]       Scale app processes (e.g., web=3)
+    ps                       List running processes
 
     deploy [path]            Deploy application
     logs [app]               View application logs
@@ -1041,6 +1227,8 @@ EXAMPLES:
     paas init                Initialize app with current directory name
     paas apps create myapp   Create a new app called "myapp"
     paas addons add postgres Add PostgreSQL database
+    paas scale web=3         Scale to 3 web dynos
+    paas ps                  Show running processes
     git push paas main       Deploy via git push
 
 ENVIRONMENT:
