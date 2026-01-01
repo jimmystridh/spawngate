@@ -5,6 +5,7 @@
 
 use crate::addons::{AddonConfig, AddonManager, AddonPlan, AddonType};
 use crate::builder::{BuildConfig, BuildMode, Builder};
+use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord};
 use crate::git::{GitServer, GitServerConfig};
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
@@ -21,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 /// Platform API configuration
@@ -55,56 +56,36 @@ impl Default for PlatformApiConfig {
     }
 }
 
-/// Application state stored in the platform
+/// Application state returned by API (includes config from db)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct App {
-    /// Application name (unique identifier)
     pub name: String,
-
-    /// Application status
-    pub status: AppStatus,
-
-    /// Git repository URL
+    pub status: String,
     pub git_url: Option<String>,
-
-    /// Currently deployed image
     pub image: Option<String>,
-
-    /// Port the application listens on
     pub port: u16,
-
-    /// Environment variables
     pub env: HashMap<String, String>,
-
-    /// Attached add-ons
     pub addons: Vec<String>,
-
-    /// Created timestamp
     pub created_at: String,
-
-    /// Last deployed timestamp
     pub deployed_at: Option<String>,
-
-    /// Current commit hash
     pub commit: Option<String>,
 }
 
-/// Application lifecycle status
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AppStatus {
-    /// App is being created
-    Creating,
-    /// App is idle (not running)
-    Idle,
-    /// App is building
-    Building,
-    /// App is running
-    Running,
-    /// App failed to start/build
-    Failed,
-    /// App is being deleted
-    Deleting,
+impl App {
+    fn from_record(record: AppRecord, env: HashMap<String, String>, addons: Vec<String>) -> Self {
+        Self {
+            name: record.name,
+            status: record.status,
+            git_url: record.git_url,
+            image: record.image,
+            port: record.port as u16,
+            env,
+            addons,
+            created_at: record.created_at,
+            deployed_at: record.deployed_at,
+            commit: record.commit_hash,
+        }
+    }
 }
 
 /// Request to create a new app
@@ -133,11 +114,8 @@ pub struct AddAddonRequest {
 /// Request to deploy an app
 #[derive(Debug, Deserialize)]
 pub struct DeployRequest {
-    /// Source path (local) or git URL
     pub source: Option<String>,
-    /// Build mode override
     pub build_mode: Option<String>,
-    /// Clear build cache
     #[serde(default)]
     pub clear_cache: bool,
 }
@@ -179,7 +157,7 @@ impl<T: Serialize> ApiResponse<T> {
 /// Platform API server
 pub struct PlatformApi {
     config: PlatformApiConfig,
-    apps: Arc<RwLock<HashMap<String, App>>>,
+    db: Arc<Database>,
     addon_manager: Arc<AddonManager>,
     builder: Arc<Builder>,
     git_server: Arc<GitServer>,
@@ -194,6 +172,11 @@ impl PlatformApi {
     ) -> Result<Self> {
         // Create data directory
         tokio::fs::create_dir_all(&config.data_dir).await?;
+
+        // Initialize database
+        let db_path = config.data_dir.join("paas.db");
+        let db = Database::open(&db_path)?;
+        info!("Database initialized at {}", db_path.display());
 
         // Initialize addon manager
         let addon_manager = AddonManager::new(None, Some(&config.network_name)).await?;
@@ -214,39 +197,14 @@ impl PlatformApi {
         // Scan for existing repos
         git_server.scan_repos().await?;
 
-        // Load existing app state
-        let apps = Self::load_apps(&config.data_dir).await.unwrap_or_default();
-
         Ok(Self {
             config,
-            apps: Arc::new(RwLock::new(apps)),
+            db: Arc::new(db),
             addon_manager: Arc::new(addon_manager),
             builder: Arc::new(builder),
             git_server: Arc::new(git_server),
             shutdown_rx,
         })
-    }
-
-    /// Load app state from disk
-    async fn load_apps(data_dir: &PathBuf) -> Result<HashMap<String, App>> {
-        let apps_file = data_dir.join("apps.json");
-        if apps_file.exists() {
-            let content = tokio::fs::read_to_string(&apps_file).await?;
-            let apps: HashMap<String, App> = serde_json::from_str(&content)?;
-            info!("Loaded {} apps from state file", apps.len());
-            Ok(apps)
-        } else {
-            Ok(HashMap::new())
-        }
-    }
-
-    /// Save app state to disk
-    async fn save_apps(&self) -> Result<()> {
-        let apps = self.apps.read().await;
-        let apps_file = self.config.data_dir.join("apps.json");
-        let content = serde_json::to_string_pretty(&*apps)?;
-        tokio::fs::write(&apps_file, content).await?;
-        Ok(())
     }
 
     /// Run the API server
@@ -356,7 +314,7 @@ impl PlatformApi {
             // Apps
             (Method::GET, "/apps") => self.list_apps().await,
             (Method::POST, "/apps") => self.create_app(req).await,
-            (Method::GET, path) if path.starts_with("/apps/") && !path.contains("/addons") && !path.contains("/logs") && !path.contains("/config") && !path.contains("/deploy") => {
+            (Method::GET, path) if path.starts_with("/apps/") && !path.contains("/addons") && !path.contains("/logs") && !path.contains("/config") && !path.contains("/deploy") && !path.contains("/deployments") => {
                 let app_name = path.strip_prefix("/apps/").unwrap();
                 self.get_app(app_name).await
             }
@@ -401,6 +359,12 @@ impl PlatformApi {
                 self.deploy_app(app_name, req).await
             }
 
+            // Deployments history
+            (Method::GET, path) if path.ends_with("/deployments") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/deployments")).unwrap_or("");
+                self.list_deployments(app_name).await
+            }
+
             // Logs
             (Method::GET, path) if path.ends_with("/logs") => {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/logs")).unwrap_or("");
@@ -434,10 +398,19 @@ impl PlatformApi {
     // ==================== App Management ====================
 
     async fn list_apps(&self) -> Result<Response<Full<Bytes>>> {
-        let apps = self.apps.read().await;
-        let app_list: Vec<&App> = apps.values().collect();
+        let records = self.db.list_apps()?;
 
-        let response = ApiResponse::ok(app_list);
+        let mut apps = Vec::new();
+        for record in records {
+            let env = self.db.get_all_config(&record.name)?;
+            let addon_records = self.db.get_app_addons(&record.name)?;
+            let addons: Vec<String> = addon_records.iter()
+                .map(|a| format!("{}:{}", a.addon_type, a.plan))
+                .collect();
+            apps.push(App::from_record(record, env, addons));
+        }
+
+        let response = ApiResponse::ok(apps);
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
 
@@ -456,52 +429,63 @@ impl PlatformApi {
         }
 
         // Check if already exists
-        {
-            let apps = self.apps.read().await;
-            if apps.contains_key(&create_req.name) {
-                return Ok(json_error(StatusCode::CONFLICT, "App already exists"));
-            }
+        if self.db.get_app(&create_req.name)?.is_some() {
+            return Ok(json_error(StatusCode::CONFLICT, "App already exists"));
         }
 
         // Create git repository
-        let git_repo = self.git_server.create_app(&create_req.name).await
+        let _git_repo = self.git_server.create_app(&create_req.name).await
             .context("Failed to create git repository")?;
 
-        let now = chrono_now();
+        let git_url = self.git_server.get_remote_url(&create_req.name);
 
-        let app = App {
+        // Create app record
+        let record = AppRecord {
             name: create_req.name.clone(),
-            status: AppStatus::Idle,
-            git_url: Some(self.git_server.get_remote_url(&create_req.name)),
+            status: "idle".to_string(),
+            git_url: Some(git_url.clone()),
             image: None,
-            port: create_req.port,
-            env: create_req.env,
-            addons: vec![],
-            created_at: now,
+            port: create_req.port as i32,
+            created_at: String::new(), // Will be set by database
             deployed_at: None,
-            commit: None,
+            commit_hash: None,
         };
 
-        // Store app
-        {
-            let mut apps = self.apps.write().await;
-            apps.insert(app.name.clone(), app.clone());
+        self.db.create_app(&record)?;
+
+        // Store initial env vars
+        for (key, value) in &create_req.env {
+            self.db.set_config(&create_req.name, key, value, false)?;
         }
 
-        // Persist state
-        self.save_apps().await?;
+        info!(app = %create_req.name, git_url = %git_url, "Created new app");
 
-        info!(app = %app.name, git_url = ?git_repo.repo_path, "Created new app");
+        // Fetch the created app to return
+        let app_record = self.db.get_app(&create_req.name)?.unwrap();
+        let app = App::from_record(app_record, create_req.env, vec![]);
 
         let response = ApiResponse::ok(app);
         Ok(json_response(StatusCode::CREATED, serde_json::to_string(&response)?))
     }
 
     async fn get_app(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
-        let apps = self.apps.read().await;
+        if let Some(record) = self.db.get_app(app_name)? {
+            let env = self.db.get_all_config(app_name)?;
 
-        if let Some(app) = apps.get(app_name) {
-            let response = ApiResponse::ok(app.clone());
+            // Get addon env vars and merge
+            let addon_env = self.addon_manager.get_env_vars(app_name).await;
+            let mut merged_env = env;
+            for (k, v) in addon_env {
+                merged_env.entry(k).or_insert(v);
+            }
+
+            let addon_records = self.db.get_app_addons(app_name)?;
+            let addons: Vec<String> = addon_records.iter()
+                .map(|a| format!("{}:{}", a.addon_type, a.plan))
+                .collect();
+
+            let app = App::from_record(record, merged_env, addons);
+            let response = ApiResponse::ok(app);
             Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
         } else {
             Ok(json_error(StatusCode::NOT_FOUND, "App not found"))
@@ -510,29 +494,20 @@ impl PlatformApi {
 
     async fn delete_app(self: Arc<Self>, app_name: &str) -> Result<Response<Full<Bytes>>> {
         // Check if app exists
-        {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
 
         info!(app = %app_name, "Deleting app");
 
-        // Remove add-ons
+        // Remove add-ons from Docker
         self.addon_manager.deprovision_all(app_name).await?;
 
         // Delete git repository
         self.git_server.delete_app(app_name).await?;
 
-        // Remove from state
-        {
-            let mut apps = self.apps.write().await;
-            apps.remove(app_name);
-        }
-
-        // Persist state
-        self.save_apps().await?;
+        // Delete from database (cascades to config, addons, deployments, domains)
+        self.db.delete_app(app_name)?;
 
         let response: ApiResponse<()> = ApiResponse::ok(());
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
@@ -542,14 +517,11 @@ impl PlatformApi {
 
     async fn list_addons(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
         // Check if app exists
-        {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
 
-        let addons = self.addon_manager.get_app_addons(app_name).await;
+        let addons = self.db.get_app_addons(app_name)?;
         let response = ApiResponse::ok(addons);
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
@@ -560,11 +532,8 @@ impl PlatformApi {
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<Full<Bytes>>> {
         // Check if app exists
-        {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
 
         let body = req.collect().await?.to_bytes();
@@ -598,40 +567,47 @@ impl PlatformApi {
 
         let config = AddonConfig {
             addon_type: addon_type.clone(),
-            plan,
+            plan: plan.clone(),
             name: None,
             network: Some(self.config.network_name.clone()),
         };
 
         info!(app = %app_name, addon = %addon_type, "Provisioning addon");
 
+        // Provision the addon via Docker
         let instance = self.addon_manager.provision(app_name, &config).await
             .context("Failed to provision addon")?;
 
-        // Update app's addon list
-        {
-            let mut apps = self.apps.write().await;
-            if let Some(app) = apps.get_mut(app_name) {
-                let addon_key = format!("{}:{}", addon_type, instance.id);
-                if !app.addons.contains(&addon_key) {
-                    app.addons.push(addon_key);
-                }
-            }
+        // Store in database
+        let addon_record = AddonRecord {
+            id: instance.id.clone(),
+            app_name: app_name.to_string(),
+            addon_type: addon_type.to_string(),
+            plan: format!("{:?}", plan).to_lowercase(),
+            container_id: instance.container_id.clone(),
+            container_name: Some(instance.container_name.clone()),
+            connection_url: Some(instance.connection_url.clone()),
+            env_var_name: Some(instance.env_var_name.clone()),
+            status: "running".to_string(),
+            created_at: String::new(),
+        };
+
+        self.db.create_addon(&addon_record)?;
+
+        // Store addon env vars in app config
+        self.db.set_config(app_name, &instance.env_var_name, &instance.connection_url, false)?;
+        for (key, value) in &instance.env_vars {
+            self.db.set_config(app_name, key, value, false)?;
         }
 
-        self.save_apps().await?;
-
-        let response = ApiResponse::ok(instance);
+        let response = ApiResponse::ok(addon_record);
         Ok(json_response(StatusCode::CREATED, serde_json::to_string(&response)?))
     }
 
     async fn remove_addon(self: Arc<Self>, app_name: &str, addon_type_str: &str) -> Result<Response<Full<Bytes>>> {
         // Check if app exists
-        {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
 
         let addon_type = match addon_type_str.to_lowercase().as_str() {
@@ -645,18 +621,12 @@ impl PlatformApi {
 
         info!(app = %app_name, addon = %addon_type, "Removing addon");
 
+        // Deprovision from Docker
         self.addon_manager.deprovision(app_name, &addon_type).await
             .context("Failed to remove addon")?;
 
-        // Update app's addon list
-        {
-            let mut apps = self.apps.write().await;
-            if let Some(app) = apps.get_mut(app_name) {
-                app.addons.retain(|a| !a.starts_with(&format!("{}:", addon_type)));
-            }
-        }
-
-        self.save_apps().await?;
+        // Remove from database
+        self.db.delete_addon(app_name, addon_type_str)?;
 
         let response: ApiResponse<()> = ApiResponse::ok(());
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
@@ -665,21 +635,21 @@ impl PlatformApi {
     // ==================== Config Management ====================
 
     async fn get_config(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
-        let apps = self.apps.read().await;
-
-        if let Some(app) = apps.get(app_name) {
-            // Merge app env with addon env vars
-            let addon_env = self.addon_manager.get_env_vars(app_name).await;
-            let mut config = app.env.clone();
-            for (k, v) in addon_env {
-                config.entry(k).or_insert(v);
-            }
-
-            let response = ApiResponse::ok(config);
-            Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
-        } else {
-            Ok(json_error(StatusCode::NOT_FOUND, "App not found"))
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
+
+        let mut config = self.db.get_all_config(app_name)?;
+
+        // Merge with addon env vars
+        let addon_env = self.addon_manager.get_env_vars(app_name).await;
+        for (k, v) in addon_env {
+            config.entry(k).or_insert(v);
+        }
+
+        let response = ApiResponse::ok(config);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
 
     async fn set_config(
@@ -688,11 +658,8 @@ impl PlatformApi {
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<Full<Bytes>>> {
         // Check if app exists
-        {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
 
         let body = req.collect().await?.to_bytes();
@@ -703,21 +670,15 @@ impl PlatformApi {
             }
         };
 
-        // Update app config
-        {
-            let mut apps = self.apps.write().await;
-            if let Some(app) = apps.get_mut(app_name) {
-                for (k, v) in config_req.env {
-                    if v.is_empty() {
-                        app.env.remove(&k);
-                    } else {
-                        app.env.insert(k, v);
-                    }
-                }
+        // Update config in database
+        for (key, value) in config_req.env {
+            if value.is_empty() {
+                self.db.delete_config(app_name, &key)?;
+            } else {
+                let is_secret = key.contains("SECRET") || key.contains("PASSWORD") || key.contains("KEY");
+                self.db.set_config(app_name, &key, &value, is_secret)?;
             }
         }
-
-        self.save_apps().await?;
 
         let response: ApiResponse<()> = ApiResponse::ok(());
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
@@ -730,14 +691,12 @@ impl PlatformApi {
         app_name: &str,
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<Full<Bytes>>> {
-        // Check if app exists and get work path
-        let work_path = {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
-            self.config.data_dir.join("work").join(app_name)
-        };
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let work_path = self.config.data_dir.join("work").join(app_name);
 
         let body = req.collect().await?.to_bytes();
         let deploy_req: DeployRequest = if body.is_empty() {
@@ -756,14 +715,24 @@ impl PlatformApi {
         };
 
         // Update app status to building
-        {
-            let mut apps = self.apps.write().await;
-            if let Some(app) = apps.get_mut(app_name) {
-                app.status = AppStatus::Building;
-            }
-        }
+        self.db.update_app_status(app_name, "building")?;
 
-        info!(app = %app_name, "Starting deployment");
+        // Create deployment record
+        let deploy_id = uuid::Uuid::new_v4().to_string();
+        let deployment = DeploymentRecord {
+            id: deploy_id.clone(),
+            app_name: app_name.to_string(),
+            status: "building".to_string(),
+            image: None,
+            commit_hash: None,
+            build_logs: None,
+            duration_secs: None,
+            created_at: String::new(),
+            finished_at: None,
+        };
+        self.db.create_deployment(&deployment)?;
+
+        info!(app = %app_name, deploy_id = %deploy_id, "Starting deployment");
 
         // Determine source path
         let source_path = deploy_req.source
@@ -771,11 +740,8 @@ impl PlatformApi {
             .unwrap_or(work_path);
 
         if !source_path.exists() {
-            // Update status to failed
-            let mut apps = self.apps.write().await;
-            if let Some(app) = apps.get_mut(app_name) {
-                app.status = AppStatus::Failed;
-            }
+            self.db.update_app_status(app_name, "failed")?;
+            self.db.update_deployment(&deploy_id, "failed", None, Some("Source path does not exist"), None)?;
             return Ok(json_error(StatusCode::BAD_REQUEST, "Source path does not exist. Push code with git first."));
         }
 
@@ -812,25 +778,23 @@ impl PlatformApi {
         // Run build
         let result = self.builder.build(&config).await?;
 
+        // Update deployment record
+        let logs = result.logs.join("\n");
+        self.db.update_deployment(
+            &deploy_id,
+            if result.success { "success" } else { "failed" },
+            Some(&result.image),
+            Some(&logs),
+            Some(result.duration_secs),
+        )?;
+
         // Update app state
-        {
-            let mut apps = self.apps.write().await;
-            if let Some(app) = apps.get_mut(app_name) {
-                if result.success {
-                    app.status = AppStatus::Idle; // Will be Running when started
-                    app.image = Some(result.image.clone());
-                    app.deployed_at = Some(chrono_now());
-                } else {
-                    app.status = AppStatus::Failed;
-                }
-            }
-        }
-
-        self.save_apps().await?;
-
         if result.success {
+            self.db.update_app_status(app_name, "idle")?;
+            self.db.update_app_deployment(app_name, &result.image, None)?;
             info!(app = %app_name, image = %result.image, "Deployment successful");
         } else {
+            self.db.update_app_status(app_name, "failed")?;
             error!(app = %app_name, error = ?result.error, "Deployment failed");
         }
 
@@ -845,27 +809,47 @@ impl PlatformApi {
         ))
     }
 
+    async fn list_deployments(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let deployments = self.db.get_deployments(app_name, 20)?;
+        let response = ApiResponse::ok(deployments);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
     async fn trigger_build(self: Arc<Self>, app_name: &str) -> Result<Response<Full<Bytes>>> {
         // Triggered by git post-receive hook
         info!(app = %app_name, "Build triggered by git push");
 
         let result = self.git_server.build_app(app_name).await?;
 
-        // Update app state
-        {
-            let mut apps = self.apps.write().await;
-            if let Some(app) = apps.get_mut(app_name) {
-                if result.success {
-                    app.status = AppStatus::Idle;
-                    app.image = Some(result.image.clone());
-                    app.deployed_at = Some(chrono_now());
-                } else {
-                    app.status = AppStatus::Failed;
-                }
-            }
-        }
+        // Create deployment record
+        let deploy_id = uuid::Uuid::new_v4().to_string();
+        let logs = result.logs.join("\n");
 
-        self.save_apps().await?;
+        let deployment = DeploymentRecord {
+            id: deploy_id.clone(),
+            app_name: app_name.to_string(),
+            status: if result.success { "success" } else { "failed" }.to_string(),
+            image: Some(result.image.clone()),
+            commit_hash: None,
+            build_logs: Some(logs),
+            duration_secs: Some(result.duration_secs),
+            created_at: String::new(),
+            finished_at: None,
+        };
+        self.db.create_deployment(&deployment)?;
+
+        // Update app state
+        if result.success {
+            self.db.update_app_status(app_name, "idle")?;
+            self.db.update_app_deployment(app_name, &result.image, None)?;
+        } else {
+            self.db.update_app_status(app_name, "failed")?;
+        }
 
         let response = ApiResponse::ok(result);
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
@@ -875,16 +859,20 @@ impl PlatformApi {
 
     async fn get_logs(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
         // Check if app exists
-        {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
 
-        // For now, return empty logs
-        // TODO: Integrate with container logs
-        let logs: Vec<String> = vec![];
+        // Get logs from recent deployment
+        let deployments = self.db.get_deployments(app_name, 1)?;
+        let logs: Vec<String> = if let Some(deploy) = deployments.first() {
+            deploy.build_logs.as_ref()
+                .map(|l| l.lines().map(String::from).collect())
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
         let response = ApiResponse::ok(logs);
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
@@ -893,11 +881,8 @@ impl PlatformApi {
 
     async fn get_git_info(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
         // Check if app exists
-        {
-            let apps = self.apps.read().await;
-            if !apps.contains_key(app_name) {
-                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
-            }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
         }
 
         let remote_url = self.git_server.get_remote_url(app_name);
@@ -929,14 +914,6 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response<Full<B
     json_response(status, serde_json::to_string(&response).unwrap())
 }
 
-fn chrono_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap();
-    format!("{}", duration.as_secs())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,12 +936,5 @@ mod tests {
         assert!(!error.success);
         assert!(error.data.is_none());
         assert_eq!(error.error, Some("failed".to_string()));
-    }
-
-    #[test]
-    fn test_chrono_now() {
-        let now = chrono_now();
-        let parsed: u64 = now.parse().unwrap();
-        assert!(parsed > 1700000000); // After 2023
     }
 }

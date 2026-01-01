@@ -41,6 +41,9 @@ parking_lot = "0.12"
 serde_json = "1.0.148"
 uuid = { version = "1.19.0", features = ["v4"] }
 
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = "0.26"
