@@ -56,6 +56,21 @@ pub struct Dyno {
     pub started_at: String,
 }
 
+/// Result of a rolling deploy operation
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RollingDeployResult {
+    pub app_name: String,
+    pub total_dynos: usize,
+    pub successful: usize,
+    pub failed: usize,
+}
+
+impl RollingDeployResult {
+    pub fn is_success(&self) -> bool {
+        self.failed == 0 && self.total_dynos > 0
+    }
+}
+
 /// Dyno status
 #[derive(Debug, Clone, PartialEq)]
 pub enum DynoStatus {
@@ -373,42 +388,138 @@ impl DynoManager {
 
     /// Restart all dynos for an app (for rolling deploys)
     pub async fn restart_all(&self, app_name: &str) -> Result<()> {
+        self.rolling_restart(app_name, None).await?;
+        Ok(())
+    }
+
+    /// Perform a rolling restart with optional new image
+    ///
+    /// This implements a zero-downtime rolling deploy:
+    /// 1. For each old dyno: spawn a new one, wait for it to be ready, then stop the old one
+    /// 2. Maintains at least one running dyno at all times
+    pub async fn rolling_restart(&self, app_name: &str, new_image: Option<&str>) -> Result<RollingDeployResult> {
         let app = self.db.get_app(app_name)?
             .ok_or_else(|| anyhow::anyhow!("App not found: {}", app_name))?;
 
-        let image = app.image
+        let image = new_image.map(String::from)
+            .or(app.image)
             .ok_or_else(|| anyhow::anyhow!("App has no image"))?;
 
         let processes = self.db.get_app_processes(app_name)?;
         let running: Vec<_> = processes
             .iter()
             .filter(|p| p.status == "running")
+            .cloned()
             .collect();
+
+        let total = running.len();
+
+        if total == 0 {
+            info!(app = app_name, "No running dynos to restart");
+            return Ok(RollingDeployResult {
+                app_name: app_name.to_string(),
+                total_dynos: 0,
+                successful: 0,
+                failed: 0,
+            });
+        }
 
         info!(
             app = app_name,
-            count = running.len(),
-            "Restarting all dynos"
+            count = total,
+            image = image,
+            "Starting rolling deploy"
         );
 
-        // Stop old dynos and start new ones
-        for proc in running {
-            // Start new dyno first
-            if let Err(e) = self.spawn_dyno(app_name, &image, &proc.process_type, app.port as u16).await {
-                error!(app = app_name, error = %e, "Failed to spawn replacement dyno");
-                continue;
-            }
+        let mut successful = 0;
+        let mut failed = 0;
 
-            // Wait a bit for new dyno to be ready
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        for (idx, proc) in running.iter().enumerate() {
+            info!(
+                app = app_name,
+                dyno = idx + 1,
+                total,
+                "Rolling deploy: replacing dyno"
+            );
 
-            // Stop old dyno
-            if let Err(e) = self.stop_dyno(&proc.id).await {
-                warn!(dyno_id = proc.id, error = %e, "Failed to stop old dyno");
+            // Spawn new dyno with potentially new image
+            match self.spawn_dyno(app_name, &image, &proc.process_type, app.port as u16).await {
+                Ok(new_dyno) => {
+                    debug!(
+                        app = app_name,
+                        old_dyno = proc.id,
+                        new_dyno = new_dyno.id,
+                        "New dyno spawned, waiting for ready..."
+                    );
+
+                    // Wait for new dyno to be ready (check if port is accepting connections)
+                    let ready = self.wait_for_dyno_ready(new_dyno.port, 30).await;
+
+                    if ready {
+                        info!(
+                            app = app_name,
+                            new_dyno = new_dyno.id,
+                            port = new_dyno.port,
+                            "New dyno is ready"
+                        );
+
+                        // Stop old dyno
+                        if let Err(e) = self.stop_dyno(&proc.id).await {
+                            warn!(dyno_id = proc.id, error = %e, "Failed to stop old dyno");
+                        }
+
+                        successful += 1;
+                    } else {
+                        warn!(
+                            app = app_name,
+                            new_dyno = new_dyno.id,
+                            "New dyno failed to become ready, keeping old dyno"
+                        );
+                        // Stop the unhealthy new dyno
+                        let _ = self.stop_dyno(&new_dyno.id).await;
+                        failed += 1;
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        app = app_name,
+                        dyno = idx + 1,
+                        error = %e,
+                        "Failed to spawn replacement dyno"
+                    );
+                    failed += 1;
+                }
             }
         }
 
-        Ok(())
+        info!(
+            app = app_name,
+            successful,
+            failed,
+            "Rolling deploy complete"
+        );
+
+        Ok(RollingDeployResult {
+            app_name: app_name.to_string(),
+            total_dynos: total,
+            successful,
+            failed,
+        })
+    }
+
+    /// Wait for a dyno to become ready (accepts TCP connections)
+    async fn wait_for_dyno_ready(&self, port: u16, timeout_secs: u64) -> bool {
+        let addr = format!("127.0.0.1:{}", port);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+        while std::time::Instant::now() < deadline {
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        false
     }
 
     /// Get all running dynos for an app

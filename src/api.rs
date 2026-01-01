@@ -430,6 +430,11 @@ impl PlatformApi {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/processes")).unwrap_or("");
                 self.list_processes(app_name).await
             }
+            // Restart (rolling deploy)
+            (Method::POST, path) if path.ends_with("/restart") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/restart")).unwrap_or("");
+                self.restart_app(app_name).await
+            }
 
             // Logs
             (Method::GET, path) if path.ends_with("/logs") => {
@@ -1034,6 +1039,30 @@ impl PlatformApi {
         let processes = self.db.get_app_processes(app_name)?;
         let response = ApiResponse::ok(processes);
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn restart_app(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        // Check if app exists
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        info!(app = %app_name, "Triggering rolling restart");
+
+        // Use DynoManager for rolling restart
+        match self.dyno_manager.rolling_restart(app_name, None).await {
+            Ok(result) => {
+                let response = ApiResponse::ok(result);
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            Err(e) => {
+                error!(app = %app_name, error = %e, "Rolling restart failed");
+                Ok(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Rolling restart failed: {}", e),
+                ))
+            }
+        }
     }
 }
 

@@ -114,8 +114,15 @@ enum Command {
     Init(InitOptions),
     Scale(ScaleOptions),
     Ps(PsOptions),
+    Restart(RestartOptions),
     Help,
     Version,
+}
+
+#[derive(Debug)]
+struct RestartOptions {
+    /// App name (defaults to current app)
+    app: Option<String>,
 }
 
 #[derive(Debug)]
@@ -302,6 +309,7 @@ fn run() -> Result<()> {
         Command::Init(opts) => handle_init(opts)?,
         Command::Scale(opts) => handle_scale(opts)?,
         Command::Ps(opts) => handle_ps(opts)?,
+        Command::Restart(opts) => handle_restart(opts)?,
     }
 
     Ok(())
@@ -323,6 +331,7 @@ fn parse_command(args: &[String]) -> Command {
         "init" | "create" => parse_init_command(&args[1..]),
         "scale" => parse_scale_command(&args[1..]),
         "ps" | "processes" => parse_ps_command(&args[1..]),
+        "restart" => parse_restart_command(&args[1..]),
         _ => {
             // Check if it's a shorthand
             if args[0].starts_with("apps:") {
@@ -464,6 +473,11 @@ fn parse_scale_command(args: &[String]) -> Command {
 fn parse_ps_command(args: &[String]) -> Command {
     let app = args.get(0).filter(|s| !s.starts_with('-')).cloned();
     Command::Ps(PsOptions { app })
+}
+
+fn parse_restart_command(args: &[String]) -> Command {
+    let app = args.get(0).filter(|s| !s.starts_with('-')).cloned();
+    Command::Restart(RestartOptions { app })
 }
 
 fn handle_apps(cmd: AppsCommand) -> Result<()> {
@@ -1181,6 +1195,55 @@ fn handle_ps(opts: PsOptions) -> Result<()> {
     Ok(())
 }
 
+/// Rolling deploy result from API
+#[derive(Debug, Deserialize)]
+struct RollingDeployResult {
+    app_name: String,
+    total_dynos: usize,
+    successful: usize,
+    failed: usize,
+}
+
+fn handle_restart(opts: RestartOptions) -> Result<()> {
+    let client = ApiClient::new()?;
+    let app = opts.app.unwrap_or_else(|| get_current_app().unwrap_or_default());
+
+    if app.is_empty() {
+        println!("Usage: paas restart [app]");
+        return Ok(());
+    }
+
+    println!("Restarting all dynos for {}...", app);
+    println!();
+
+    let response = client.post(&format!("/apps/{}/restart", app), "{}")?;
+    let result: ApiResponse<RollingDeployResult> = serde_json::from_str(&response)
+        .context("Failed to parse API response")?;
+
+    if result.success {
+        if let Some(deploy) = result.data {
+            if deploy.total_dynos == 0 {
+                println!("No running dynos to restart.");
+                println!("Scale up your app with 'paas scale web=1'");
+            } else if deploy.failed == 0 {
+                println!("✓ Rolling deploy complete!");
+                println!("  {} {} restarted successfully",
+                    deploy.successful,
+                    if deploy.successful == 1 { "dyno" } else { "dynos" }
+                );
+            } else {
+                println!("⚠ Rolling deploy completed with errors");
+                println!("  Successful: {}", deploy.successful);
+                println!("  Failed: {}", deploy.failed);
+            }
+        }
+    } else {
+        println!("Failed to restart: {}", result.error.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(r#"
 paas - Your own Heroku (with Docker support)
@@ -1201,6 +1264,7 @@ COMMANDS:
 
     scale [type=N ...]       Scale app processes (e.g., web=3)
     ps                       List running processes
+    restart [app]            Rolling restart all dynos
 
     deploy [path]            Deploy application
     logs [app]               View application logs

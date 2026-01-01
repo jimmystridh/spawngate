@@ -17,14 +17,14 @@ Simple UI to see apps, logs, metrics.
 - [x] Real-time log viewer
 - [x] Basic metrics (requests, memory, CPU)
 
-## 3. Horizontal Scaling
+## 3. Horizontal Scaling ✅
 Run multiple instances of an app with load balancing.
 
 - [x] Add `scale` command to CLI (`paas scale web=3`)
 - [x] Spawn multiple containers per app
 - [x] Integrate with spawngate proxy for load balancing
 - [x] Health checks for each instance
-- [ ] Rolling deploys
+- [x] Rolling deploys
 
 ## 4. Secrets Management
 Encrypted environment variables.
