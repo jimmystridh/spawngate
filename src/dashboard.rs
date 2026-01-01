@@ -596,7 +596,20 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
                     </svg>
                 </button>
-                <div class="search-box">
+                <nav class="breadcrumbs" x-show="breadcrumbs.length > 0">
+                    <template x-for="(crumb, index) in breadcrumbs" :key="index">
+                        <span class="breadcrumb-item">
+                            <span class="breadcrumb-separator" x-show="index > 0">/</span>
+                            <a :href="crumb.href" x-text="crumb.label"
+                                x-bind:hx-get="crumb.hxGet"
+                                hx-target="#main-content"
+                                hx-push-url="true"
+                                @click="updateBreadcrumbs(breadcrumbs.slice(0, index + 1))"
+                                :class="{ 'breadcrumb-current': index === breadcrumbs.length - 1 }"></a>
+                        </span>
+                    </template>
+                </nav>
+                <div class="search-box" x-show="breadcrumbs.length === 0">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
@@ -1012,6 +1025,38 @@ body {
     display: flex;
     align-items: center;
     gap: 1rem;
+}
+
+.breadcrumbs {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.875rem;
+}
+
+.breadcrumb-item {
+    display: flex;
+    align-items: center;
+}
+
+.breadcrumb-separator {
+    color: var(--text-muted);
+    margin: 0 0.5rem;
+}
+
+.breadcrumbs a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+
+.breadcrumbs a:hover {
+    color: var(--primary);
+}
+
+.breadcrumb-current {
+    color: var(--text-primary) !important;
+    font-weight: 500;
 }
 
 .mobile-menu-btn {
@@ -2080,11 +2125,13 @@ function dashboard() {
         currentPage: 'apps',
         showModal: null,
         currentApp: null,
+        breadcrumbs: [],
 
         init() {
             document.body.classList.add(this.theme);
             this.setupHtmxHandlers();
             this.setupKeyboardShortcuts();
+            this.initBreadcrumbs();
 
             // Restore current page from URL
             const path = window.location.pathname;
@@ -2100,6 +2147,41 @@ function dashboard() {
             if (appMatch) {
                 this.currentApp = appMatch[1];
             }
+        },
+
+        initBreadcrumbs() {
+            const path = window.location.pathname;
+            this.breadcrumbs = this.buildBreadcrumbs(path);
+        },
+
+        buildBreadcrumbs(path) {
+            const crumbs = [];
+
+            // App detail pages
+            const appMatch = path.match(/\/dashboard\/apps\/([^\/]+)/);
+            if (appMatch) {
+                crumbs.push({ label: 'Apps', href: '/dashboard', hxGet: '/dashboard/apps' });
+                crumbs.push({ label: appMatch[1], href: `/dashboard/apps/${appMatch[1]}`, hxGet: `/dashboard/apps/${appMatch[1]}` });
+            }
+
+            return crumbs;
+        },
+
+        updateBreadcrumbs(crumbs) {
+            this.breadcrumbs = crumbs;
+        },
+
+        navigateToApp(appName) {
+            this.currentApp = appName;
+            this.breadcrumbs = [
+                { label: 'Apps', href: '/dashboard', hxGet: '/dashboard/apps' },
+                { label: appName, href: `/dashboard/apps/${appName}`, hxGet: `/dashboard/apps/${appName}` }
+            ];
+        },
+
+        navigateToApps() {
+            this.currentApp = null;
+            this.breadcrumbs = [];
         },
 
         toggleTheme() {
@@ -2142,11 +2224,16 @@ function dashboard() {
                 }
             });
 
-            // Update current app from URL changes
+            // Update current app and breadcrumbs from URL changes
             document.body.addEventListener('htmx:pushedIntoHistory', (e) => {
-                const appMatch = e.detail.path.match(/\/apps\/([^\/]+)/);
+                const path = e.detail.path;
+                const appMatch = path.match(/\/dashboard\/apps\/([^\/]+)/);
                 if (appMatch) {
                     this.currentApp = appMatch[1];
+                    this.breadcrumbs = this.buildBreadcrumbs(path);
+                } else if (path === '/dashboard' || path === '/dashboard/') {
+                    this.currentApp = null;
+                    this.breadcrumbs = [];
                 }
             });
         },

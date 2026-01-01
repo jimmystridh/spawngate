@@ -4,6 +4,7 @@
 //! add-ons, deployments, and logs. The CLI tool communicates with this API.
 
 use crate::addons::{AddonConfig, AddonManager, AddonPlan, AddonType};
+use crate::auth::{AuthConfig, AuthManager};
 use crate::builder::{BuildConfig, BuildMode, Builder};
 use crate::dashboard;
 use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord, WebhookRecord, WebhookEventRecord};
@@ -21,7 +22,7 @@ use crate::webhooks::{
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
-use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
+use hyper::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -207,6 +208,7 @@ pub struct PlatformApi {
     domain_manager: Arc<DomainManager>,
     dns_verifier: Arc<DnsVerifier>,
     ssl_manager: Arc<SslManager>,
+    auth_manager: Arc<AuthManager>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -303,6 +305,18 @@ impl PlatformApi {
             debug!("Loaded {} custom domains from database", domain_count);
         }
 
+        // Initialize JWT auth manager
+        let auth_config = AuthConfig {
+            secret: config.auth_token.clone(),
+            token_expiry_hours: 24,
+            cookie_name: "spawngate_session".to_string(),
+            cookie_secure: !config.bind_addr.ip().is_loopback(),
+            cookie_http_only: true,
+            cookie_same_site: "Strict".to_string(),
+        };
+        let auth_manager = AuthManager::new(auth_config);
+        debug!("JWT authentication initialized");
+
         Ok(Self {
             config,
             db: db_arc,
@@ -317,6 +331,7 @@ impl PlatformApi {
             domain_manager: Arc::new(domain_manager),
             dns_verifier: Arc::new(dns_verifier),
             ssl_manager: Arc::new(ssl_manager),
+            auth_manager: Arc::new(auth_manager),
             shutdown_rx,
         })
     }
@@ -391,15 +406,41 @@ impl PlatformApi {
     }
 
     fn check_auth(&self, req: &Request<hyper::body::Incoming>) -> bool {
-        req.headers()
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|auth| {
-                auth.strip_prefix("Bearer ")
-                    .unwrap_or(auth)
-                    .eq(&self.config.auth_token)
-            })
-            .unwrap_or(false)
+        // Try JWT from cookie first (dashboard sessions)
+        if let Some(cookie) = req.headers().get(COOKIE).and_then(|v| v.to_str().ok()) {
+            if let Some(token) = self.auth_manager.extract_token_from_cookie(cookie) {
+                if self.auth_manager.verify_token(&token).is_ok() {
+                    return true;
+                }
+            }
+        }
+
+        // Try JWT from Authorization header
+        if let Some(auth) = req.headers().get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+            if let Some(token) = self.auth_manager.extract_token_from_header(auth) {
+                if self.auth_manager.verify_token(&token).is_ok() {
+                    return true;
+                }
+            }
+
+            // Fall back to legacy static token auth (for CLI compatibility)
+            let token = auth.strip_prefix("Bearer ").unwrap_or(auth);
+            if token == self.config.auth_token {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn check_dashboard_auth(&self, req: &Request<hyper::body::Incoming>) -> bool {
+        // Only check cookie-based JWT for dashboard
+        if let Some(cookie) = req.headers().get(COOKIE).and_then(|v| v.to_str().ok()) {
+            if let Some(token) = self.auth_manager.extract_token_from_cookie(cookie) {
+                return self.auth_manager.verify_token(&token).is_ok();
+            }
+        }
+        false
     }
 
     async fn handle_request(
@@ -425,10 +466,7 @@ impl PlatformApi {
             return Ok(json_response(StatusCode::OK, version.to_string()));
         }
 
-        // Dashboard - no auth required for static assets
-        if path == "/" || path == "/dashboard" || path == "/dashboard/" {
-            return Ok(dashboard::serve_dashboard());
-        }
+        // Dashboard static assets - no auth required
         if path == "/dashboard/style.css" {
             return Ok(dashboard::serve_css());
         }
@@ -436,7 +474,40 @@ impl PlatformApi {
             return Ok(dashboard::serve_js());
         }
 
-        // Auth required for all other endpoints
+        // Dashboard login page - no auth required
+        if path == "/dashboard/login" && method == Method::GET {
+            return Ok(dashboard::serve_login());
+        }
+
+        // Dashboard login handler - authenticate and set cookie
+        if path == "/dashboard/auth" && method == Method::POST {
+            return Ok(self.handle_dashboard_login(req).await);
+        }
+
+        // Dashboard logout - clear session cookie
+        if path == "/dashboard/logout" && method == Method::POST {
+            return Ok(self.handle_dashboard_logout());
+        }
+
+        // Main dashboard - requires auth, redirect to login if not authenticated
+        if path == "/" || path == "/dashboard" || path == "/dashboard/" {
+            if self.check_dashboard_auth(&req) {
+                return Ok(dashboard::serve_dashboard());
+            } else {
+                return Ok(redirect_response("/dashboard/login"));
+            }
+        }
+
+        // Dashboard API endpoints - require auth
+        if path.starts_with("/dashboard/") {
+            if !self.check_dashboard_auth(&req) {
+                return Ok(redirect_response("/dashboard/login"));
+            }
+            // Handle dashboard-specific API endpoints here (like /dashboard/apps for HTMX)
+            return Ok(self.handle_dashboard_api(&path, &method, req).await);
+        }
+
+        // API endpoints - require auth
         if !self.check_auth(&req) {
             warn!(%path, "Unauthorized API request");
             return Ok(json_response(
@@ -2051,6 +2122,250 @@ impl PlatformApi {
             }
         }
     }
+
+    // ==================== Dashboard Authentication ====================
+
+    async fn handle_dashboard_login(&self, req: Request<hyper::body::Incoming>) -> Response<Full<Bytes>> {
+        let body = match req.collect().await {
+            Ok(b) => b.to_bytes(),
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "Failed to read request body"),
+        };
+
+        // Parse form data (token=xxx)
+        let body_str = String::from_utf8_lossy(&body);
+        let mut token_value = None;
+
+        for pair in body_str.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                if key == "token" {
+                    token_value = Some(urlencoding::decode(value).unwrap_or_default().to_string());
+                }
+            }
+        }
+
+        let provided_token = match token_value {
+            Some(t) => t,
+            None => return self.login_error_response("Token is required"),
+        };
+
+        // Verify the provided token matches the configured auth token
+        if provided_token != self.config.auth_token {
+            warn!("Dashboard login failed: invalid token");
+            return self.login_error_response("Invalid token");
+        }
+
+        // Create JWT session token
+        let jwt = match self.auth_manager.create_token("dashboard", "admin") {
+            Ok(t) => t,
+            Err(e) => {
+                error!(error = %e, "Failed to create JWT token");
+                return self.login_error_response("Authentication failed");
+            }
+        };
+
+        // Create session cookie
+        let cookie = self.auth_manager.create_session_cookie(&jwt);
+
+        info!("Dashboard login successful");
+
+        // Redirect to dashboard with session cookie
+        Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header("Location", "/dashboard")
+            .header(SET_COOKIE, cookie)
+            .body(Full::new(Bytes::new()))
+            .expect("valid response")
+    }
+
+    fn login_error_response(&self, message: &str) -> Response<Full<Bytes>> {
+        let html = format!(
+            r##"<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Login Error</title>
+<link rel="stylesheet" href="/dashboard/style.css">
+</head><body class="login-page dark">
+<div class="login-container"><div class="login-card">
+<div class="login-header"><h1>Login Failed</h1><p class="error">{}</p></div>
+<a href="/dashboard/login" class="btn btn-primary btn-block">Try Again</a>
+</div></div></body></html>"##,
+            message
+        );
+        html_response(StatusCode::UNAUTHORIZED, html)
+    }
+
+    fn handle_dashboard_logout(&self) -> Response<Full<Bytes>> {
+        let cookie = self.auth_manager.create_logout_cookie();
+        info!("Dashboard logout");
+
+        Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header("Location", "/dashboard/login")
+            .header(SET_COOKIE, cookie)
+            .body(Full::new(Bytes::new()))
+            .expect("valid response")
+    }
+
+    async fn handle_dashboard_api(
+        &self,
+        path: &str,
+        method: &Method,
+        req: Request<hyper::body::Incoming>,
+    ) -> Response<Full<Bytes>> {
+        // Dashboard HTMX API endpoints
+        match (method, path) {
+            // Get apps list (HTMX partial)
+            (&Method::GET, "/dashboard/apps") => {
+                match self.db.list_apps() {
+                    Ok(apps) => {
+                        let apps_json: Vec<serde_json::Value> = apps.iter().map(|app| {
+                            serde_json::json!({
+                                "name": app.name,
+                                "status": app.status,
+                                "port": app.port,
+                            })
+                        }).collect();
+                        let html = dashboard::render_apps_list(&apps_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to list apps for dashboard");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load apps</div>"##)
+                    }
+                }
+            }
+
+            // Get single app detail (HTMX partial)
+            (&Method::GET, p) if p.starts_with("/dashboard/apps/") && !p.contains("/config") && !p.contains("/domains") && !p.contains("/addons") && !p.contains("/deployments") => {
+                let app_name = p.strip_prefix("/dashboard/apps/").unwrap_or("");
+                match self.db.get_app(app_name) {
+                    Ok(Some(app)) => {
+                        let config = self.db.get_all_config(app_name).unwrap_or_default();
+                        let addons = self.db.get_app_addons(app_name).unwrap_or_default();
+                        let app_json = serde_json::json!({
+                            "name": app.name,
+                            "status": app.status,
+                            "port": app.port,
+                            "git_url": app.git_url,
+                            "image": app.image,
+                            "env": config,
+                            "addons": addons.iter().map(|a| a.addon_type.clone()).collect::<Vec<_>>(),
+                        });
+                        let html = dashboard::render_app_detail(&app_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Ok(None) => {
+                        html_response(StatusCode::NOT_FOUND,
+                            r##"<div class="error">App not found</div>"##)
+                    }
+                    Err(e) => {
+                        error!(error = %e, app = %app_name, "Failed to get app for dashboard");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load app</div>"##)
+                    }
+                }
+            }
+
+            // Get config vars (HTMX partial)
+            (&Method::GET, p) if p.ends_with("/config") => {
+                let app_name = p.strip_prefix("/dashboard/apps/")
+                    .and_then(|p| p.strip_suffix("/config"))
+                    .unwrap_or("");
+                match self.db.get_all_config(app_name) {
+                    Ok(config) => {
+                        let config_json = serde_json::to_value(&config).unwrap_or_default();
+                        let html = dashboard::render_config_vars(&config_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get config");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load config</div>"##)
+                    }
+                }
+            }
+
+            // Get domains (HTMX partial)
+            (&Method::GET, p) if p.ends_with("/domains") => {
+                let app_name = p.strip_prefix("/dashboard/apps/")
+                    .and_then(|p| p.strip_suffix("/domains"))
+                    .unwrap_or("");
+                match self.db.get_app_domains(app_name) {
+                    Ok(domains) => {
+                        let domains_json: Vec<serde_json::Value> = domains.iter().map(|d| {
+                            serde_json::json!({
+                                "hostname": d.domain,
+                                "dns_verified": d.verified,
+                                "ssl_status": if d.ssl_enabled { "active" } else { "pending" },
+                            })
+                        }).collect();
+                        let html = dashboard::render_domains_list(&domains_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get domains");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load domains</div>"##)
+                    }
+                }
+            }
+
+            // Get addons (HTMX partial)
+            (&Method::GET, p) if p.ends_with("/addons") => {
+                let app_name = p.strip_prefix("/dashboard/apps/")
+                    .and_then(|p| p.strip_suffix("/addons"))
+                    .unwrap_or("");
+                match self.db.get_app_addons(app_name) {
+                    Ok(addons) => {
+                        let addons_json: Vec<serde_json::Value> = addons.iter().map(|a| {
+                            serde_json::json!({
+                                "addon_type": a.addon_type,
+                                "plan": a.plan,
+                                "status": a.status,
+                            })
+                        }).collect();
+                        let html = dashboard::render_addons_list(&addons_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get addons");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load addons</div>"##)
+                    }
+                }
+            }
+
+            // Get deployments (HTMX partial)
+            (&Method::GET, p) if p.ends_with("/deployments") => {
+                let app_name = p.strip_prefix("/dashboard/apps/")
+                    .and_then(|p| p.strip_suffix("/deployments"))
+                    .unwrap_or("");
+                match self.db.get_deployments(app_name, 10) {
+                    Ok(deploys) => {
+                        let deploys_json: Vec<serde_json::Value> = deploys.iter().map(|d| {
+                            serde_json::json!({
+                                "status": d.status,
+                                "image": d.image,
+                                "duration_secs": d.duration_secs,
+                                "created_at": d.created_at,
+                            })
+                        }).collect();
+                        let html = dashboard::render_deployments_list(&deploys_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get deployments");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load deployments</div>"##)
+                    }
+                }
+            }
+
+            _ => {
+                html_response(StatusCode::NOT_FOUND,
+                    r##"<div class="error">Not found</div>"##)
+            }
+        }
+    }
 }
 
 // ==================== Helper Functions ====================
@@ -2066,6 +2381,22 @@ fn json_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<By
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response<Full<Bytes>> {
     let response: ApiResponse<()> = ApiResponse::error(message);
     json_response(status, serde_json::to_string(&response).unwrap())
+}
+
+fn redirect_response(location: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("Location", location)
+        .body(Full::new(Bytes::new()))
+        .expect("valid response")
+}
+
+fn html_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Full::new(body.into()))
+        .expect("valid response")
 }
 
 #[cfg(test)]
