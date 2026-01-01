@@ -21,6 +21,7 @@ pub mod config;
 pub mod dashboard;
 pub mod db;
 pub mod docker;
+pub mod dyno;
 pub mod error;
 pub mod git;
 pub mod pool;

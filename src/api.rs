@@ -7,6 +7,8 @@ use crate::addons::{AddonConfig, AddonManager, AddonPlan, AddonType};
 use crate::builder::{BuildConfig, BuildMode, Builder};
 use crate::dashboard;
 use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord};
+use crate::docker::DockerManager;
+use crate::dyno::{DynoConfig, DynoManager};
 use crate::git::{GitServer, GitServerConfig};
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
@@ -170,6 +172,7 @@ pub struct PlatformApi {
     addon_manager: Arc<AddonManager>,
     builder: Arc<Builder>,
     git_server: Arc<GitServer>,
+    dyno_manager: Arc<DynoManager>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -206,12 +209,28 @@ impl PlatformApi {
         // Scan for existing repos
         git_server.scan_repos().await?;
 
+        // Initialize Docker and dyno manager
+        let docker = DockerManager::new(None).await?;
+        let db_arc = Arc::new(db);
+        let dyno_config = DynoConfig {
+            network: config.network_name.clone(),
+            health_check_url: Some(format!("http://{}", config.bind_addr)),
+            memory_limit: Some("512m".to_string()),
+            cpu_limit: Some("0.5".to_string()),
+        };
+        let dyno_manager = DynoManager::new(
+            Arc::new(docker),
+            Arc::clone(&db_arc),
+            dyno_config,
+        ).await?;
+
         Ok(Self {
             config,
-            db: Arc::new(db),
+            db: db_arc,
             addon_manager: Arc::new(addon_manager),
             builder: Arc::new(builder),
             git_server: Arc::new(git_server),
+            dyno_manager: Arc::new(dyno_manager),
             shutdown_rx,
         })
     }
@@ -962,8 +981,22 @@ impl PlatformApi {
 
         info!(app = %app_name, scale = scale_req.scale, "Scaling app");
 
-        // Update scale in database
-        self.db.update_app_scale(app_name, scale_req.scale)?;
+        // Check if app has been deployed (has an image)
+        if app.image.is_none() && scale_req.scale > 0 {
+            return Ok(json_error(
+                StatusCode::BAD_REQUEST,
+                "App has not been deployed yet. Deploy the app first with 'git push paas main'",
+            ));
+        }
+
+        // Use DynoManager to actually spawn/stop containers
+        if let Err(e) = self.dyno_manager.scale(app_name, "web", scale_req.scale).await {
+            error!(app = %app_name, error = %e, "Failed to scale app");
+            return Ok(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to scale app: {}", e),
+            ));
+        }
 
         let result = serde_json::json!({
             "app": app_name,
