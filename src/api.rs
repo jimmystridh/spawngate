@@ -5,6 +5,7 @@
 
 use crate::addons::{AddonConfig, AddonManager, AddonPlan, AddonType};
 use crate::builder::{BuildConfig, BuildMode, Builder};
+use crate::dashboard;
 use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord};
 use crate::git::{GitServer, GitServerConfig};
 use anyhow::{Context, Result};
@@ -298,6 +299,17 @@ impl PlatformApi {
                 "version": env!("CARGO_PKG_VERSION"),
             });
             return Ok(json_response(StatusCode::OK, version.to_string()));
+        }
+
+        // Dashboard - no auth required for static assets
+        if path == "/" || path == "/dashboard" || path == "/dashboard/" {
+            return Ok(dashboard::serve_dashboard());
+        }
+        if path == "/dashboard/style.css" {
+            return Ok(dashboard::serve_css());
+        }
+        if path == "/dashboard/app.js" {
+            return Ok(dashboard::serve_js());
         }
 
         // Auth required for all other endpoints

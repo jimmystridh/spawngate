@@ -8,14 +8,14 @@ Store app configs in SQLite so they survive restarts.
 - [x] Migration system for schema changes
 - [x] Replace JSON file persistence with SQLite
 
-## 2. Web Dashboard
+## 2. Web Dashboard ✅
 Simple UI to see apps, logs, metrics.
 
-- [ ] Serve static dashboard from API server
-- [ ] App list view with status indicators
-- [ ] App detail page (config, addons, deploys)
-- [ ] Real-time log viewer
-- [ ] Basic metrics (requests, memory, CPU)
+- [x] Serve static dashboard from API server
+- [x] App list view with status indicators
+- [x] App detail page (config, addons, deploys)
+- [x] Real-time log viewer
+- [x] Basic metrics (requests, memory, CPU)
 
 ## 3. Horizontal Scaling
 Run multiple instances of an app with load balancing.
