@@ -801,6 +801,38 @@ impl PlatformApi {
             // Evaluate alerts (for manual trigger or cron)
             (Method::POST, "/alerts/evaluate") => self.evaluate_alerts().await,
 
+            // Formation management (per-process-type scaling)
+            (Method::GET, path) if path.ends_with("/formation") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/formation")).unwrap_or("");
+                self.get_app_formation(app_name).await
+            }
+            (Method::PATCH, path) if path.ends_with("/formation") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/formation")).unwrap_or("");
+                self.update_app_formation(app_name, req).await
+            }
+            (Method::PUT, path) if path.contains("/formation/") => {
+                let path_trimmed = path.strip_prefix("/apps/").unwrap_or("");
+                let parts: Vec<&str> = path_trimmed.split("/formation/").collect();
+                if parts.len() == 2 {
+                    let app_name = parts[0];
+                    let process_type = parts[1];
+                    self.set_formation_process(app_name, process_type, req).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
+            }
+            (Method::DELETE, path) if path.contains("/formation/") => {
+                let path_trimmed = path.strip_prefix("/apps/").unwrap_or("");
+                let parts: Vec<&str> = path_trimmed.split("/formation/").collect();
+                if parts.len() == 2 {
+                    let app_name = parts[0];
+                    let process_type = parts[1];
+                    self.delete_formation_process(app_name, process_type).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
+            }
+
             _ => Ok(json_error(StatusCode::NOT_FOUND, "Not found")),
         };
 
@@ -2871,6 +2903,36 @@ impl PlatformApi {
                 }
             }
 
+            // Get formation (HTMX partial for formation editor)
+            (&Method::GET, p) if p.ends_with("/formation") && p.starts_with("/dashboard/apps/") => {
+                let app_name = p.strip_prefix("/dashboard/apps/")
+                    .and_then(|p| p.strip_suffix("/formation"))
+                    .unwrap_or("");
+
+                match self.db.get_app_formations(app_name) {
+                    Ok(formations) => {
+                        let formations_json: Vec<serde_json::Value> = formations.iter()
+                            .map(|f| {
+                                serde_json::json!({
+                                    "process_type": f.process_type,
+                                    "quantity": f.quantity,
+                                    "size": f.size,
+                                    "command": f.command,
+                                    "created_at": f.created_at,
+                                    "updated_at": f.updated_at,
+                                })
+                            }).collect();
+                        let html = dashboard::render_formation_editor(app_name, &formations_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get formations");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load formations</div>"##)
+                    }
+                }
+            }
+
             // Get encryption key info (JSON for secrets tab)
             (&Method::GET, p) if p.ends_with("/encryption-key") => {
                 let secrets_manager = self.secrets_manager.read().await;
@@ -3273,6 +3335,173 @@ impl PlatformApi {
             "ok": result.ok,
             "no_data": result.no_data,
             "errors": result.errors,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    // ==================== Formation Management ====================
+
+    async fn get_app_formation(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        if app_name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "App name is required"));
+        }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let formations = self.db.get_app_formations(app_name)?;
+
+        // If no formations, return default web formation
+        if formations.is_empty() {
+            let default = serde_json::json!([{
+                "process_type": "web",
+                "quantity": 1,
+                "size": "standard",
+                "command": null
+            }]);
+            let response = ApiResponse::ok(default);
+            return Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?));
+        }
+
+        let response = ApiResponse::ok(formations);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn update_app_formation(
+        self: Arc<Self>,
+        app_name: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        if app_name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "App name is required"));
+        }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let updates: serde_json::Value = serde_json::from_slice(&body)?;
+
+        // Updates is an object like {"web": {"quantity": 3}, "worker": {"quantity": 2}}
+        if let Some(obj) = updates.as_object() {
+            for (process_type, config) in obj {
+                let quantity = config["quantity"].as_i64().map(|q| q as i32);
+                let size = config["size"].as_str();
+                let command = config["command"].as_str();
+
+                // Get or create formation
+                let existing = self.db.get_formation(app_name, process_type)?;
+                let formation = crate::db::FormationRecord {
+                    app_name: app_name.to_string(),
+                    process_type: process_type.clone(),
+                    quantity: quantity.unwrap_or_else(|| existing.as_ref().map(|e| e.quantity).unwrap_or(1)),
+                    size: size.map(String::from).unwrap_or_else(|| existing.as_ref().map(|e| e.size.clone()).unwrap_or_else(|| "standard".to_string())),
+                    command: command.map(String::from).or_else(|| existing.as_ref().and_then(|e| e.command.clone())),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                };
+                self.db.set_formation(&formation)?;
+
+                // Log activity
+                self.db.log_activity(
+                    "scale",
+                    &format!("Updated {} formation to {} instances", process_type, formation.quantity),
+                    Some(app_name),
+                    Some("formation"),
+                    Some(process_type),
+                    None,
+                    "api",
+                    None,
+                    None,
+                )?;
+            }
+        }
+
+        let formations = self.db.get_app_formations(app_name)?;
+        let response = ApiResponse::ok(formations);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn set_formation_process(
+        self: Arc<Self>,
+        app_name: &str,
+        process_type: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        if app_name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "App name is required"));
+        }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let config: serde_json::Value = serde_json::from_slice(&body)?;
+
+        let quantity = config["quantity"].as_i64().unwrap_or(1) as i32;
+        let size = config["size"].as_str().unwrap_or("standard");
+        let command = config["command"].as_str();
+
+        let formation = crate::db::FormationRecord {
+            app_name: app_name.to_string(),
+            process_type: process_type.to_string(),
+            quantity,
+            size: size.to_string(),
+            command: command.map(String::from),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        self.db.set_formation(&formation)?;
+
+        self.db.log_activity(
+            "scale",
+            &format!("Set {} formation: {} instances ({})", process_type, quantity, size),
+            Some(app_name),
+            Some("formation"),
+            Some(process_type),
+            None,
+            "api",
+            None,
+            None,
+        )?;
+
+        let updated = self.db.get_formation(app_name, process_type)?;
+        let response = ApiResponse::ok(updated);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn delete_formation_process(&self, app_name: &str, process_type: &str) -> Result<Response<Full<Bytes>>> {
+        if app_name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "App name is required"));
+        }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Don't allow deleting the last formation
+        let formations = self.db.get_app_formations(app_name)?;
+        if formations.len() <= 1 {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Cannot delete the last formation"));
+        }
+
+        self.db.delete_formation(app_name, process_type)?;
+
+        self.db.log_activity(
+            "scale",
+            &format!("Removed {} formation", process_type),
+            Some(app_name),
+            Some("formation"),
+            Some(process_type),
+            None,
+            "api",
+            None,
+            None,
+        )?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "deleted": true,
+            "process_type": process_type,
         }));
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }

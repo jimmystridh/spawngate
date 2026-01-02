@@ -97,7 +97,7 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Process type cards (web, worker, etc.)
 - [x] Restart/stop individual instances
 - [x] Resource usage graphs (CPU, memory)
-- [ ] Formation editor
+- [x] Formation editor
 
 ### Phase 5: Domains & SSL ✅
 - [x] Domain list with status badges

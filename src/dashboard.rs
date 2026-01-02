@@ -3129,6 +3129,261 @@ input:checked + .toggle-slider:before { transform: translateX(18px); }
 </style>"##
 }
 
+/// Generate HTML for the formation editor page
+pub fn render_formation_editor(app_name: &str, formations: &[serde_json::Value]) -> String {
+    let dyno_sizes = vec![
+        ("standard-1x", "Standard 1X", "512MB RAM, 1 CPU share"),
+        ("standard-2x", "Standard 2X", "1GB RAM, 2 CPU shares"),
+        ("performance-m", "Performance M", "2.5GB RAM, 4 CPU shares"),
+        ("performance-l", "Performance L", "14GB RAM, 8 CPU shares"),
+    ];
+
+    let formation_cards: Vec<String> = formations.iter().map(|f| {
+        let process_type = f["process_type"].as_str().unwrap_or("web");
+        let quantity = f["quantity"].as_i64().unwrap_or(1);
+        let size = f["size"].as_str().unwrap_or("standard-1x");
+        let command = f["command"].as_str().unwrap_or("");
+
+        let type_icon = match process_type {
+            "web" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>"##,
+            "worker" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>"##,
+            "release" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>"##,
+            _ => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>"##,
+        };
+
+        let size_options: Vec<String> = dyno_sizes.iter().map(|(value, label, _)| {
+            let selected = if *value == size { " selected" } else { "" };
+            format!(r#"<option value="{}"{}>{}</option>"#, value, selected, label)
+        }).collect();
+
+        format!(
+            r##"<div class="formation-card" x-data="{{ quantity: {quantity}, size: '{size}', saving: false, deleting: false }}">
+    <div class="formation-header">
+        <div class="formation-type">
+            <span class="type-icon">{type_icon}</span>
+            <div class="type-info">
+                <h3>{process_type}</h3>
+                <span class="command-preview" title="{command}">{command_display}</span>
+            </div>
+        </div>
+        <div class="formation-actions">
+            <button class="btn btn-icon btn-danger"
+                @click="if(confirm('Delete {process_type} process?')) {{ deleting = true; fetch('/apps/{app_name}/formation/{process_type}', {{method: 'DELETE'}}).then(() => htmx.trigger(document.body, 'reload')) }}"
+                :disabled="deleting"
+                title="Delete process">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+    <div class="formation-controls">
+        <div class="control-group">
+            <label>Quantity</label>
+            <div class="quantity-control">
+                <button class="btn btn-icon btn-sm" @click="quantity = Math.max(0, quantity - 1)" :disabled="quantity <= 0">−</button>
+                <input type="number" x-model.number="quantity" min="0" max="100" class="quantity-input">
+                <button class="btn btn-icon btn-sm" @click="quantity = Math.min(100, quantity + 1)" :disabled="quantity >= 100">+</button>
+            </div>
+        </div>
+        <div class="control-group">
+            <label>Size</label>
+            <select x-model="size" class="size-select">
+                {size_options}
+            </select>
+        </div>
+    </div>
+    <div class="formation-footer">
+        <button class="btn btn-primary"
+            @click="saving = true; fetch('/apps/{app_name}/formation/{process_type}', {{
+                method: 'PUT',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{quantity: quantity, size: size}})
+            }}).then(r => r.json()).then(d => {{
+                saving = false;
+                showToast(d.ok ? 'Formation updated' : d.error, d.ok ? 'success' : 'error');
+            }}).catch(e => {{ saving = false; showToast('Error updating formation', 'error'); }})"
+            :disabled="saving"
+            x-text="saving ? 'Saving...' : 'Save'">
+            Save
+        </button>
+    </div>
+</div>"##,
+            quantity = quantity,
+            size = size,
+            type_icon = type_icon,
+            process_type = process_type,
+            command = command,
+            command_display = if command.is_empty() { "(no command)" } else { command },
+            size_options = size_options.join("\n                "),
+            app_name = app_name
+        )
+    }).collect();
+
+    let empty_state = if formations.is_empty() {
+        r##"<div class="empty-state">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/>
+            </svg>
+            <h3>No process types defined</h3>
+            <p>Add a process type to configure scaling</p>
+        </div>"##.to_string()
+    } else {
+        String::new()
+    };
+
+    format!(
+        r##"<div class="formation-page" x-data="{{ showAddModal: false }}" hx-trigger="reload from:body" hx-get="/dashboard/apps/{app_name}/formation" hx-swap="innerHTML">
+    {css}
+    <div class="page-header">
+        <div class="header-left">
+            <h2>Formation</h2>
+            <span class="badge">{count} process types</span>
+        </div>
+        <button class="btn btn-primary" @click="showAddModal = true">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+            </svg>
+            Add Process
+        </button>
+    </div>
+
+    <div class="formation-grid">
+        {cards}
+        {empty_state}
+    </div>
+
+    {add_modal}
+</div>"##,
+        app_name = app_name,
+        css = get_formation_css(),
+        count = formations.len(),
+        cards = formation_cards.join("\n        "),
+        empty_state = empty_state,
+        add_modal = get_add_process_modal(app_name, &dyno_sizes)
+    )
+}
+
+fn get_add_process_modal(app_name: &str, dyno_sizes: &[(&str, &str, &str)]) -> String {
+    let size_options: Vec<String> = dyno_sizes.iter().map(|(value, label, desc)| {
+        format!(r#"<option value="{}" title="{}">{}</option>"#, value, desc, label)
+    }).collect();
+
+    format!(
+        r##"<div x-show="showAddModal" class="modal-backdrop" @click.self="showAddModal = false">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>Add Process Type</h3>
+            <button class="btn btn-icon" @click="showAddModal = false">&times;</button>
+        </div>
+        <form x-data="{{ submitting: false }}"
+            @submit.prevent="submitting = true; fetch('/apps/{app_name}/formation/' + $refs.processType.value, {{
+                method: 'PUT',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    quantity: parseInt($refs.quantity.value),
+                    size: $refs.size.value,
+                    command: $refs.command.value || null
+                }})
+            }}).then(r => r.json()).then(d => {{
+                submitting = false;
+                if(d.ok) {{
+                    showAddModal = false;
+                    showToast('Process added', 'success');
+                    htmx.trigger(document.body, 'reload');
+                }} else {{
+                    showToast(d.error || 'Failed to add process', 'error');
+                }}
+            }}).catch(e => {{ submitting = false; showToast('Error adding process', 'error'); }})">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Process Type *</label>
+                    <input type="text" x-ref="processType" class="input" required
+                        placeholder="web, worker, scheduler..." pattern="[a-z][a-z0-9_-]*">
+                    <span class="hint">Lowercase letters, numbers, dashes, underscores</span>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Quantity</label>
+                        <input type="number" x-ref="quantity" class="input" value="1" min="0" max="100">
+                    </div>
+                    <div class="form-group">
+                        <label>Size</label>
+                        <select x-ref="size" class="input">
+                            {size_options}
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Command (optional)</label>
+                    <input type="text" x-ref="command" class="input" placeholder="npm start, bundle exec puma...">
+                    <span class="hint">Overrides the Procfile command for this process type</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline" @click="showAddModal = false">Cancel</button>
+                <button type="submit" class="btn btn-primary" :disabled="submitting" x-text="submitting ? 'Adding...' : 'Add Process'">Add Process</button>
+            </div>
+        </form>
+    </div>
+</div>"##,
+        app_name = app_name,
+        size_options = size_options.join("\n                            ")
+    )
+}
+
+fn get_formation_css() -> &'static str {
+    r##"<style>
+.formation-page { padding: 20px; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-left h2 { margin: 0; }
+
+.formation-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 16px; }
+
+.formation-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+.formation-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+.formation-type { display: flex; align-items: flex-start; gap: 12px; }
+.type-icon { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; background: var(--primary-light, #e0f2fe); border-radius: 8px; color: var(--primary); }
+.type-info h3 { margin: 0 0 4px 0; font-size: 1.1rem; }
+.command-preview { font-size: 0.85em; color: var(--text-muted); font-family: monospace; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+
+.formation-controls { display: flex; gap: 20px; margin-bottom: 16px; }
+.control-group { flex: 1; }
+.control-group label { display: block; margin-bottom: 8px; font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
+
+.quantity-control { display: flex; align-items: center; gap: 4px; }
+.quantity-control .btn-icon { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); cursor: pointer; font-size: 1.2rem; }
+.quantity-control .btn-icon:hover:not(:disabled) { background: var(--bg-hover); }
+.quantity-control .btn-icon:disabled { opacity: 0.5; cursor: not-allowed; }
+.quantity-input { width: 60px; text-align: center; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--input-bg, var(--card-bg)); font-size: 1rem; }
+.quantity-input:focus { outline: none; border-color: var(--primary); }
+
+.size-select { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--input-bg, var(--card-bg)); font-size: 0.95rem; cursor: pointer; }
+.size-select:focus { outline: none; border-color: var(--primary); }
+
+.formation-footer { display: flex; justify-content: flex-end; padding-top: 16px; border-top: 1px solid var(--border); }
+
+.empty-state { grid-column: 1 / -1; text-align: center; padding: 60px 20px; color: var(--text-muted); background: var(--card-bg); border: 2px dashed var(--border); border-radius: 12px; }
+.empty-state svg { margin-bottom: 16px; opacity: 0.5; }
+.empty-state h3 { margin: 0 0 8px 0; color: var(--text); }
+.empty-state p { margin: 0; }
+
+.modal-backdrop { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: var(--card-bg); border-radius: 12px; width: 90%; max-width: 480px; max-height: 90vh; overflow-y: auto; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.modal-header h3 { margin: 0; }
+.modal-body { padding: 20px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--border); }
+
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; margin-bottom: 6px; font-weight: 500; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.hint { display: block; margin-top: 4px; font-size: 0.8rem; color: var(--text-muted); }
+</style>"##
+}
+
 fn format_relative_time(timestamp: &str) -> String {
     // Parse timestamp and return relative time
     // For now, just return the timestamp; in a real impl, use chrono

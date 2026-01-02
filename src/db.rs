@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -119,6 +119,10 @@ impl Database {
 
             if current_version < 9 {
                 self.migrate_v9(&conn)?;
+            }
+
+            if current_version < 10 {
+                self.migrate_v10(&conn)?;
             }
         }
 
@@ -545,6 +549,34 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (9);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v10: App formations (process types with individual scaling)
+    fn migrate_v10(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v10: app formations");
+
+        conn.execute_batch(r#"
+            -- App formations (process types and their scaling config)
+            CREATE TABLE IF NOT EXISTS app_formations (
+                app_name TEXT NOT NULL,
+                process_type TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                size TEXT NOT NULL DEFAULT 'standard',
+                command TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (app_name, process_type),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Index for efficient lookups
+            CREATE INDEX IF NOT EXISTS idx_app_formations_app ON app_formations(app_name);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (10);
         "#)?;
 
         Ok(())
@@ -2257,6 +2289,124 @@ impl Database {
         )?;
         Ok(deleted)
     }
+
+    // ==================== Formation Operations ====================
+
+    pub fn set_formation(&self, formation: &FormationRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_formations (app_name, process_type, quantity, size, command)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(app_name, process_type) DO UPDATE SET
+                quantity = excluded.quantity,
+                size = excluded.size,
+                command = excluded.command,
+                updated_at = datetime('now')",
+            params![
+                formation.app_name, formation.process_type, formation.quantity,
+                formation.size, formation.command
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_formation(&self, app_name: &str, process_type: &str) -> Result<Option<FormationRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT app_name, process_type, quantity, size, command, created_at, updated_at
+             FROM app_formations WHERE app_name = ?1 AND process_type = ?2",
+            params![app_name, process_type],
+            |row| Ok(FormationRecord {
+                app_name: row.get(0)?,
+                process_type: row.get(1)?,
+                quantity: row.get(2)?,
+                size: row.get(3)?,
+                command: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            }),
+        ).optional().context("Failed to get formation")
+    }
+
+    pub fn get_app_formations(&self, app_name: &str) -> Result<Vec<FormationRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut formations = Vec::new();
+
+        let mut stmt = conn.prepare(
+            "SELECT app_name, process_type, quantity, size, command, created_at, updated_at
+             FROM app_formations WHERE app_name = ?1 ORDER BY process_type"
+        )?;
+
+        let rows = stmt.query_map(params![app_name], |row| {
+            Ok(FormationRecord {
+                app_name: row.get(0)?,
+                process_type: row.get(1)?,
+                quantity: row.get(2)?,
+                size: row.get(3)?,
+                command: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+
+        for row in rows {
+            formations.push(row?);
+        }
+        Ok(formations)
+    }
+
+    pub fn update_formation_quantity(&self, app_name: &str, process_type: &str, quantity: i32) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE app_formations SET quantity = ?3, updated_at = datetime('now')
+             WHERE app_name = ?1 AND process_type = ?2",
+            params![app_name, process_type, quantity],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_formation_size(&self, app_name: &str, process_type: &str, size: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE app_formations SET size = ?3, updated_at = datetime('now')
+             WHERE app_name = ?1 AND process_type = ?2",
+            params![app_name, process_type, size],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_formation(&self, app_name: &str, process_type: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM app_formations WHERE app_name = ?1 AND process_type = ?2",
+            params![app_name, process_type],
+        )?;
+        Ok(())
+    }
+
+    pub fn batch_update_formations(&self, app_name: &str, formations: &[FormationRecord]) -> Result<()> {
+        for formation in formations {
+            self.set_formation(formation)?;
+        }
+        Ok(())
+    }
+
+    pub fn ensure_default_formation(&self, app_name: &str) -> Result<()> {
+        // Create a default 'web' formation if none exist
+        let existing = self.get_app_formations(app_name)?;
+        if existing.is_empty() {
+            self.set_formation(&FormationRecord {
+                app_name: app_name.to_string(),
+                process_type: "web".to_string(),
+                quantity: 1,
+                size: "standard".to_string(),
+                command: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })?;
+        }
+        Ok(())
+    }
 }
 
 // ==================== Record Types ====================
@@ -2518,6 +2668,18 @@ pub struct AlertNotificationRecord {
     pub sent_at: Option<String>,
     pub error_message: Option<String>,
     pub created_at: String,
+}
+
+/// Formation record (process type scaling configuration)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormationRecord {
+    pub app_name: String,
+    pub process_type: String,
+    pub quantity: i32,
+    pub size: String,
+    pub command: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[cfg(test)]

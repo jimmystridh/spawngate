@@ -10,7 +10,7 @@
 
 use spawngate::db::{
     AddonRecord, ApiTokenRecord, AppRecord, Database, DeploymentRecord,
-    ProcessRecord, WebhookEventRecord, WebhookRecord,
+    FormationRecord, ProcessRecord, WebhookEventRecord, WebhookRecord,
 };
 use tempfile::TempDir;
 
@@ -1696,5 +1696,338 @@ mod alert_tests {
 
         let pending = db.get_pending_notifications().unwrap();
         assert_eq!(pending.len(), 0);
+    }
+}
+
+// ============================================================================
+// Formation Tests
+// ============================================================================
+
+mod formation_tests {
+    use super::*;
+
+    #[test]
+    fn test_set_and_get_formation() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("formation-app");
+        db.create_app(&app).unwrap();
+
+        let formation = FormationRecord {
+            app_name: "formation-app".to_string(),
+            process_type: "web".to_string(),
+            quantity: 2,
+            size: "standard-1x".to_string(),
+            command: Some("npm start".to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        db.set_formation(&formation).unwrap();
+
+        let retrieved = db.get_formation("formation-app", "web").unwrap();
+        assert!(retrieved.is_some());
+        let f = retrieved.unwrap();
+        assert_eq!(f.process_type, "web");
+        assert_eq!(f.quantity, 2);
+        assert_eq!(f.size, "standard-1x");
+        assert_eq!(f.command, Some("npm start".to_string()));
+    }
+
+    #[test]
+    fn test_get_formation_not_found() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("formation-app");
+        db.create_app(&app).unwrap();
+
+        let formation = db.get_formation("formation-app", "nonexistent").unwrap();
+        assert!(formation.is_none());
+    }
+
+    #[test]
+    fn test_get_app_formations() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("multi-formation-app");
+        db.create_app(&app).unwrap();
+
+        let web = FormationRecord {
+            app_name: "multi-formation-app".to_string(),
+            process_type: "web".to_string(),
+            quantity: 3,
+            size: "standard-2x".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let worker = FormationRecord {
+            app_name: "multi-formation-app".to_string(),
+            process_type: "worker".to_string(),
+            quantity: 1,
+            size: "performance-m".to_string(),
+            command: Some("bundle exec sidekiq".to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        db.set_formation(&web).unwrap();
+        db.set_formation(&worker).unwrap();
+
+        let formations = db.get_app_formations("multi-formation-app").unwrap();
+        assert_eq!(formations.len(), 2);
+
+        let web_f = formations.iter().find(|f| f.process_type == "web").unwrap();
+        let worker_f = formations.iter().find(|f| f.process_type == "worker").unwrap();
+
+        assert_eq!(web_f.quantity, 3);
+        assert_eq!(worker_f.size, "performance-m");
+    }
+
+    #[test]
+    fn test_update_formation_upsert() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("upsert-app");
+        db.create_app(&app).unwrap();
+
+        // Create initial formation
+        let formation = FormationRecord {
+            app_name: "upsert-app".to_string(),
+            process_type: "web".to_string(),
+            quantity: 1,
+            size: "standard-1x".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&formation).unwrap();
+
+        // Upsert with new values
+        let updated = FormationRecord {
+            app_name: "upsert-app".to_string(),
+            process_type: "web".to_string(),
+            quantity: 5,
+            size: "performance-l".to_string(),
+            command: Some("node server.js".to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&updated).unwrap();
+
+        let f = db.get_formation("upsert-app", "web").unwrap().unwrap();
+        assert_eq!(f.quantity, 5);
+        assert_eq!(f.size, "performance-l");
+        assert_eq!(f.command, Some("node server.js".to_string()));
+    }
+
+    #[test]
+    fn test_update_formation_quantity() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("quantity-app");
+        db.create_app(&app).unwrap();
+
+        let formation = FormationRecord {
+            app_name: "quantity-app".to_string(),
+            process_type: "web".to_string(),
+            quantity: 1,
+            size: "standard-1x".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&formation).unwrap();
+
+        db.update_formation_quantity("quantity-app", "web", 10).unwrap();
+
+        let f = db.get_formation("quantity-app", "web").unwrap().unwrap();
+        assert_eq!(f.quantity, 10);
+        assert_eq!(f.size, "standard-1x"); // Size unchanged
+    }
+
+    #[test]
+    fn test_update_formation_size() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("size-app");
+        db.create_app(&app).unwrap();
+
+        let formation = FormationRecord {
+            app_name: "size-app".to_string(),
+            process_type: "worker".to_string(),
+            quantity: 2,
+            size: "standard-1x".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&formation).unwrap();
+
+        db.update_formation_size("size-app", "worker", "performance-m").unwrap();
+
+        let f = db.get_formation("size-app", "worker").unwrap().unwrap();
+        assert_eq!(f.size, "performance-m");
+        assert_eq!(f.quantity, 2); // Quantity unchanged
+    }
+
+    #[test]
+    fn test_delete_formation() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("delete-formation-app");
+        db.create_app(&app).unwrap();
+
+        let formation = FormationRecord {
+            app_name: "delete-formation-app".to_string(),
+            process_type: "web".to_string(),
+            quantity: 1,
+            size: "standard-1x".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&formation).unwrap();
+
+        let exists = db.get_formation("delete-formation-app", "web").unwrap();
+        assert!(exists.is_some());
+
+        db.delete_formation("delete-formation-app", "web").unwrap();
+
+        let deleted = db.get_formation("delete-formation-app", "web").unwrap();
+        assert!(deleted.is_none());
+    }
+
+    #[test]
+    fn test_batch_update_formations() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("batch-app");
+        db.create_app(&app).unwrap();
+
+        let formations = vec![
+            FormationRecord {
+                app_name: "batch-app".to_string(),
+                process_type: "web".to_string(),
+                quantity: 3,
+                size: "standard-2x".to_string(),
+                command: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            FormationRecord {
+                app_name: "batch-app".to_string(),
+                process_type: "worker".to_string(),
+                quantity: 2,
+                size: "performance-m".to_string(),
+                command: Some("bundle exec sidekiq".to_string()),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            FormationRecord {
+                app_name: "batch-app".to_string(),
+                process_type: "scheduler".to_string(),
+                quantity: 1,
+                size: "standard-1x".to_string(),
+                command: Some("bundle exec clock".to_string()),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+        ];
+
+        db.batch_update_formations("batch-app", &formations).unwrap();
+
+        let all = db.get_app_formations("batch-app").unwrap();
+        assert_eq!(all.len(), 3);
+
+        let web = all.iter().find(|f| f.process_type == "web").unwrap();
+        let worker = all.iter().find(|f| f.process_type == "worker").unwrap();
+        let scheduler = all.iter().find(|f| f.process_type == "scheduler").unwrap();
+
+        assert_eq!(web.quantity, 3);
+        assert_eq!(worker.command, Some("bundle exec sidekiq".to_string()));
+        assert_eq!(scheduler.size, "standard-1x");
+    }
+
+    #[test]
+    fn test_ensure_default_formation() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("default-formation-app");
+        db.create_app(&app).unwrap();
+
+        // No formations exist yet
+        let formations = db.get_app_formations("default-formation-app").unwrap();
+        assert_eq!(formations.len(), 0);
+
+        // Ensure default - should create web process
+        db.ensure_default_formation("default-formation-app").unwrap();
+
+        let formations = db.get_app_formations("default-formation-app").unwrap();
+        assert_eq!(formations.len(), 1);
+        assert_eq!(formations[0].process_type, "web");
+        assert_eq!(formations[0].quantity, 1);
+        assert_eq!(formations[0].size, "standard");
+    }
+
+    #[test]
+    fn test_ensure_default_formation_noop_if_exists() {
+        let (db, _tmp) = create_test_db();
+        let app = create_test_app("existing-formation-app");
+        db.create_app(&app).unwrap();
+
+        // Create a formation manually
+        let formation = FormationRecord {
+            app_name: "existing-formation-app".to_string(),
+            process_type: "worker".to_string(),
+            quantity: 5,
+            size: "performance-l".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&formation).unwrap();
+
+        // Ensure default - should not add web since formations exist
+        db.ensure_default_formation("existing-formation-app").unwrap();
+
+        let formations = db.get_app_formations("existing-formation-app").unwrap();
+        assert_eq!(formations.len(), 1);
+        assert_eq!(formations[0].process_type, "worker");
+    }
+
+    #[test]
+    fn test_formation_multiple_apps_isolation() {
+        let (db, _tmp) = create_test_db();
+
+        let app1 = create_test_app("app-one");
+        let app2 = create_test_app("app-two");
+        db.create_app(&app1).unwrap();
+        db.create_app(&app2).unwrap();
+
+        // Create formations for app1
+        let f1 = FormationRecord {
+            app_name: "app-one".to_string(),
+            process_type: "web".to_string(),
+            quantity: 10,
+            size: "performance-l".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&f1).unwrap();
+
+        // Create formations for app2
+        let f2 = FormationRecord {
+            app_name: "app-two".to_string(),
+            process_type: "web".to_string(),
+            quantity: 1,
+            size: "standard-1x".to_string(),
+            command: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.set_formation(&f2).unwrap();
+
+        // Verify isolation
+        let app1_formations = db.get_app_formations("app-one").unwrap();
+        let app2_formations = db.get_app_formations("app-two").unwrap();
+
+        assert_eq!(app1_formations.len(), 1);
+        assert_eq!(app2_formations.len(), 1);
+        assert_eq!(app1_formations[0].quantity, 10);
+        assert_eq!(app2_formations[0].quantity, 1);
     }
 }
