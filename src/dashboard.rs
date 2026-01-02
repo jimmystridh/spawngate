@@ -249,19 +249,101 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
 
 <div class="tab-content" x-show="activeTab === 'settings'">
     <div class="card">
-        <h2>App Settings</h2>
-        <form hx-put="/apps/{0}" hx-swap="none" hx-on::after-request="showToast('Settings saved!', 'success')">
-            <div class="form-group">
-                <label for="app-port">Port</label>
-                <input type="number" id="app-port" name="port" value="{3}" class="input">
+        <h2>General Settings</h2>
+        <form hx-put="/apps/{0}" hx-swap="none" hx-on::after-request="showToast('Settings saved!', 'success')" class="settings-form">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="settings-port">Application Port</label>
+                    <input type="number" id="settings-port" name="port" value="{3}" min="1" max="65535" class="input">
+                    <small>The port your application listens on inside the container</small>
+                </div>
             </div>
-            <button type="submit" class="btn btn-primary">Save Settings</button>
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Save Changes</button>
+            </div>
         </form>
     </div>
+
+    <div class="card" x-data="{{ minScale: 0, maxScale: 10, currentScale: 1 }}" x-init="
+        fetch('/apps/{0}').then(r => r.json()).then(d => {{
+            if (d.data) {{
+                minScale = d.data.min_scale || 0;
+                maxScale = d.data.max_scale || 10;
+                currentScale = d.data.scale || 1;
+            }}
+        }})
+    ">
+        <h2>Scaling</h2>
+        <div class="settings-form">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Current Scale</label>
+                    <div class="scale-display">
+                        <span class="scale-value" x-text="currentScale"></span>
+                        <span class="scale-label">dynos</span>
+                    </div>
+                </div>
+            </div>
+            <div class="form-row two-col">
+                <div class="form-group">
+                    <label for="settings-min-scale">Minimum Dynos</label>
+                    <input type="number" id="settings-min-scale" x-model.number="minScale" min="0" max="10" class="input">
+                    <small>Scale to 0 to enable idle shutdown</small>
+                </div>
+                <div class="form-group">
+                    <label for="settings-max-scale">Maximum Dynos</label>
+                    <input type="number" id="settings-max-scale" x-model.number="maxScale" min="1" max="100" class="input">
+                    <small>Maximum instances for auto-scaling</small>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-primary"
+                    @click="fetch('/apps/{0}/scale', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ min_scale: minScale, max_scale: maxScale }})
+                    }}).then(() => showToast('Scaling settings saved!', 'success'))">
+                    Save Scaling
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Maintenance Mode</h2>
+        <div class="settings-row" x-data="{{ maintenanceMode: false }}">
+            <div class="settings-info">
+                <strong>Enable Maintenance Mode</strong>
+                <small>Show a maintenance page to all visitors while you make changes</small>
+            </div>
+            <label class="toggle">
+                <input type="checkbox" x-model="maintenanceMode"
+                    @change="fetch('/apps/{0}/maintenance', {{
+                        method: 'PUT',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ enabled: maintenanceMode }})
+                    }}).then(() => showToast(maintenanceMode ? 'Maintenance mode enabled' : 'Maintenance mode disabled', 'success'))">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+    </div>
+
     <div class="card danger-zone">
         <h2>Danger Zone</h2>
-        <p>Once you delete an app, there is no going back. Please be certain.</p>
-        <button class="btn btn-danger" hx-delete="/apps/{0}" hx-confirm="Are you sure you want to delete {0}? This cannot be undone." hx-on::after-request="window.location.href='/dashboard'">Delete App</button>
+        <div class="danger-item">
+            <div class="danger-info">
+                <strong>Transfer Ownership</strong>
+                <small>Transfer this app to another user or team</small>
+            </div>
+            <button class="btn btn-outline-danger" disabled title="Coming soon">Transfer</button>
+        </div>
+        <div class="danger-item">
+            <div class="danger-info">
+                <strong>Delete App</strong>
+                <small>Once deleted, all data, deployments, and add-ons will be permanently removed</small>
+            </div>
+            <button class="btn btn-danger" @click="confirmDeleteApp()">Delete App</button>
+        </div>
     </div>
 </div>
 </div>"##,
@@ -274,36 +356,61 @@ pub fn render_config_vars(config: &serde_json::Value) -> String {
     let env = config.as_object();
 
     if env.is_none() || env.unwrap().is_empty() {
-        return r##"<div class="empty-state small">No config vars set</div>"##.to_string();
+        return r##"<div class="empty-state small">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
+            </svg>
+            <p>No config vars set</p>
+            <p class="text-muted">Add environment variables to configure your app</p>
+        </div>"##.to_string();
     }
 
     let items: Vec<String> = env.unwrap().iter().map(|(key, value)| {
         let val = value.as_str().unwrap_or("");
-        let masked = if key.contains("PASSWORD") || key.contains("SECRET") || key.contains("KEY") || key.contains("TOKEN") {
-            "--------".to_string()
-        } else if val.len() > 40 {
-            format!("{}...", &val[..40])
+        let is_secret = key.contains("PASSWORD") || key.contains("SECRET") || key.contains("KEY") || key.contains("TOKEN") || key.contains("API");
+        let display_value = if is_secret {
+            "••••••••".to_string()
+        } else if val.len() > 50 {
+            format!("{}...", &val[..50])
         } else {
             val.to_string()
         };
+        let escaped_value = val.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
 
         format!(
-            r##"<div class="config-item">
+            r##"<div class="config-item" x-data="{{ showValue: false }}">
             <div class="config-info">
                 <span class="config-key">{0}</span>
-                <span class="config-value">{1}</span>
+                <span class="config-value" x-show="!showValue">{1}</span>
+                <span class="config-value config-value-revealed" x-show="showValue" x-cloak>{2}</span>
             </div>
-            <button class="btn btn-icon btn-danger"
-                hx-delete="/apps/current/config/{0}"
-                hx-confirm="Delete {0}?"
-                hx-swap="none"
-                hx-on::after-request="htmx.trigger('#config-list', 'reload')">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                </svg>
-            </button>
+            <div class="config-actions">
+                <button class="btn btn-icon" @click="showValue = !showValue" title="Toggle visibility" x-show="{3}">
+                    <svg x-show="!showValue" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                    </svg>
+                    <svg x-show="showValue" x-cloak fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                    </svg>
+                </button>
+                <button class="btn btn-icon" @click="openEditConfig('{0}', '{4}')" title="Edit">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                    </svg>
+                </button>
+                <button class="btn btn-icon btn-danger" title="Delete"
+                    hx-delete="/apps/current/config/{0}"
+                    hx-confirm="Delete {0}?"
+                    hx-swap="none"
+                    hx-on::after-request="htmx.trigger('#config-list', 'reload')">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                    </svg>
+                </button>
+            </div>
         </div>"##,
-            key, masked
+            key, display_value, val, is_secret, escaped_value
         )
     }).collect();
 
@@ -637,34 +744,197 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         </div>
     </main>
 
-    <!-- Create App Modal -->
+    <!-- Create App Modal (Multi-step Wizard) -->
     <div class="modal-backdrop" x-show="showModal === 'create-app'" x-cloak
         x-transition:enter="modal-enter" x-transition:leave="modal-leave"
-        @click.self="showModal = null" @keydown.escape.window="showModal = null">
-        <div class="modal" @click.stop>
+        @click.self="showModal = null" @keydown.escape.window="showModal = null"
+        x-data="{
+            step: 1,
+            appName: '',
+            appPort: 3000,
+            envVars: [],
+            newEnvKey: '',
+            newEnvValue: '',
+            createdApp: null,
+            isCreating: false,
+            error: null,
+            addEnvVar() {
+                if (this.newEnvKey && this.newEnvValue) {
+                    this.envVars.push({ key: this.newEnvKey, value: this.newEnvValue });
+                    this.newEnvKey = '';
+                    this.newEnvValue = '';
+                }
+            },
+            removeEnvVar(index) {
+                this.envVars.splice(index, 1);
+            },
+            async createApp() {
+                this.isCreating = true;
+                this.error = null;
+                const env = {};
+                this.envVars.forEach(v => env[v.key] = v.value);
+                try {
+                    const res = await fetch('/apps', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: this.appName, port: this.appPort, env })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        this.createdApp = data.data;
+                        this.step = 3;
+                        htmx.trigger('#apps-list', 'reload');
+                    } else {
+                        this.error = data.error || 'Failed to create app';
+                    }
+                } catch (e) {
+                    this.error = 'Failed to create app';
+                }
+                this.isCreating = false;
+            },
+            reset() {
+                this.step = 1;
+                this.appName = '';
+                this.appPort = 3000;
+                this.envVars = [];
+                this.createdApp = null;
+                this.error = null;
+            }
+        }"
+        @close-modal.window="reset()">
+        <div class="modal modal-wizard" @click.stop>
             <div class="modal-header">
-                <h2>Create New App</h2>
-                <button class="close-btn" @click="showModal = null">&times;</button>
+                <h2 x-text="step === 3 ? 'App Created!' : 'Create New App'"></h2>
+                <button class="close-btn" @click="showModal = null; reset()">&times;</button>
             </div>
-            <form hx-post="/apps" hx-swap="none" @htmx:after-request="handleAppCreated($event)">
-                <div class="modal-body">
-                    <div class="form-group">
-                        <label for="app-name">App Name</label>
-                        <input type="text" id="app-name" name="name" required pattern="[a-z0-9-]+"
-                            placeholder="my-awesome-app" class="input" autofocus>
-                        <small>Lowercase letters, numbers, and hyphens only</small>
-                    </div>
-                    <div class="form-group">
-                        <label for="app-port">Port</label>
-                        <input type="number" id="app-port" name="port" value="3000" min="1" max="65535" class="input">
-                        <small>The port your application listens on</small>
+
+            <!-- Step indicator -->
+            <div class="wizard-steps" x-show="step < 3">
+                <div class="wizard-step" :class="{ active: step >= 1, current: step === 1 }">
+                    <span class="step-number">1</span>
+                    <span class="step-label">Basics</span>
+                </div>
+                <div class="wizard-step" :class="{ active: step >= 2, current: step === 2 }">
+                    <span class="step-number">2</span>
+                    <span class="step-label">Config</span>
+                </div>
+                <div class="wizard-step" :class="{ active: step >= 3, current: step === 3 }">
+                    <span class="step-number">3</span>
+                    <span class="step-label">Deploy</span>
+                </div>
+            </div>
+
+            <!-- Step 1: Basic Info -->
+            <div class="modal-body" x-show="step === 1">
+                <div class="form-group">
+                    <label for="app-name">App Name</label>
+                    <input type="text" id="app-name" x-model="appName" required pattern="[a-z0-9-]+"
+                        placeholder="my-awesome-app" class="input" autofocus>
+                    <small>Lowercase letters, numbers, and hyphens only</small>
+                </div>
+                <div class="form-group">
+                    <label for="app-port">Port</label>
+                    <input type="number" id="app-port" x-model.number="appPort" min="1" max="65535" class="input">
+                    <small>The port your application listens on (default: 3000)</small>
+                </div>
+            </div>
+
+            <!-- Step 2: Environment Variables -->
+            <div class="modal-body" x-show="step === 2">
+                <p class="text-muted mb-4">Add environment variables (optional). You can add more later.</p>
+
+                <div class="env-var-list" x-show="envVars.length > 0">
+                    <template x-for="(env, index) in envVars" :key="index">
+                        <div class="env-var-item">
+                            <span class="env-key" x-text="env.key"></span>
+                            <span class="env-value">••••••••</span>
+                            <button type="button" class="btn btn-icon btn-danger" @click="removeEnvVar(index)">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </template>
+                </div>
+
+                <div class="env-var-add">
+                    <input type="text" x-model="newEnvKey" placeholder="KEY" class="input input-sm"
+                        pattern="[A-Za-z_][A-Za-z0-9_]*" @keydown.enter.prevent="addEnvVar()">
+                    <input type="text" x-model="newEnvValue" placeholder="value" class="input input-sm"
+                        @keydown.enter.prevent="addEnvVar()">
+                    <button type="button" class="btn btn-secondary btn-sm" @click="addEnvVar()"
+                        :disabled="!newEnvKey || !newEnvValue">Add</button>
+                </div>
+            </div>
+
+            <!-- Step 3: Success & Deploy Instructions -->
+            <div class="modal-body" x-show="step === 3">
+                <div class="success-icon">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </div>
+                <p class="text-center mb-4">Your app <strong x-text="appName"></strong> is ready!</p>
+
+                <div class="deploy-instructions">
+                    <h4>Deploy your code:</h4>
+                    <div class="code-block">
+                        <code>
+cd your-project<br>
+git init<br>
+git remote add spawngate <span x-text="createdApp?.git_url || 'git@localhost:' + appName + '.git'"></span><br>
+git add .<br>
+git commit -m "Initial commit"<br>
+git push spawngate main
+                        </code>
+                        <button class="btn btn-icon copy-btn" @click="navigator.clipboard.writeText('cd your-project && git init && git remote add spawngate ' + (createdApp?.git_url || '') + ' && git add . && git commit -m \'Initial commit\' && git push spawngate main'); showToast('Copied to clipboard', 'success')" title="Copy">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                        </button>
                     </div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" @click="showModal = null">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Create App</button>
-                </div>
-            </form>
+            </div>
+
+            <!-- Error display -->
+            <div class="modal-error" x-show="error" x-text="error"></div>
+
+            <!-- Footer -->
+            <div class="modal-footer">
+                <template x-if="step === 1">
+                    <div class="footer-buttons">
+                        <button type="button" class="btn btn-secondary" @click="showModal = null; reset()">Cancel</button>
+                        <button type="button" class="btn btn-primary" @click="step = 2" :disabled="!appName">
+                            Next
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                            </svg>
+                        </button>
+                    </div>
+                </template>
+                <template x-if="step === 2">
+                    <div class="footer-buttons">
+                        <button type="button" class="btn btn-secondary" @click="step = 1">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+                            </svg>
+                            Back
+                        </button>
+                        <button type="button" class="btn btn-primary" @click="createApp()" :disabled="isCreating">
+                            <span x-show="!isCreating">Create App</span>
+                            <span x-show="isCreating">Creating...</span>
+                        </button>
+                    </div>
+                </template>
+                <template x-if="step === 3">
+                    <div class="footer-buttons">
+                        <button type="button" class="btn btn-secondary" @click="showModal = null; reset(); loadApp(appName)">
+                            View App
+                        </button>
+                        <button type="button" class="btn btn-primary" @click="showModal = null; reset()">Done</button>
+                    </div>
+                </template>
+            </div>
         </div>
     </div>
 
@@ -781,6 +1051,75 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" @click="showModal = null">Cancel</button>
                     <button type="submit" class="btn btn-primary">Add Domain</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Delete App Confirmation Modal -->
+    <div class="modal-backdrop" x-show="showModal === 'delete-app'" x-cloak
+        @click.self="showModal = null" @keydown.escape.window="showModal = null">
+        <div class="modal modal-danger" @click.stop>
+            <div class="modal-header">
+                <h2>Delete App</h2>
+                <button class="close-btn" @click="showModal = null">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="delete-warning">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                    </svg>
+                    <p class="warning-title">Are you absolutely sure?</p>
+                    <p class="warning-text">This action <strong>cannot be undone</strong>. This will permanently delete the <strong x-text="currentApp"></strong> app, including:</p>
+                    <ul class="warning-list">
+                        <li>All config variables and secrets</li>
+                        <li>All custom domains</li>
+                        <li>All deployment history</li>
+                        <li>All attached add-ons and their data</li>
+                    </ul>
+                </div>
+                <div class="form-group">
+                    <label>Please type <strong x-text="currentApp"></strong> to confirm:</label>
+                    <input type="text" class="input" x-model="deleteConfirmInput"
+                        :placeholder="currentApp" autocomplete="off">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" @click="showModal = null; deleteConfirmInput = ''">Cancel</button>
+                <button type="button" class="btn btn-danger"
+                    :disabled="deleteConfirmInput !== currentApp"
+                    @click="deleteApp()">
+                    Delete this app
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Config Var Modal -->
+    <div class="modal-backdrop" x-show="showModal === 'edit-config'" x-cloak
+        @click.self="showModal = null" @keydown.escape.window="showModal = null">
+        <div class="modal" @click.stop>
+            <div class="modal-header">
+                <h2>Edit Config Variable</h2>
+                <button class="close-btn" @click="showModal = null">&times;</button>
+            </div>
+            <form :hx-put="'/apps/' + currentApp + '/config'" hx-swap="none" @htmx:after-request="handleConfigUpdated($event)">
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Key</label>
+                        <input type="text" class="input" :value="editingConfigKey" readonly disabled>
+                        <input type="hidden" name="key" :value="editingConfigKey">
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-config-value">Value</label>
+                        <textarea id="edit-config-value" name="value" required class="input textarea" rows="3"
+                            x-model="editingConfigValue"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @click="showModal = null">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
                 </div>
             </form>
         </div>
@@ -1510,6 +1849,37 @@ body {
     word-break: break-all;
 }
 
+.config-value-revealed {
+    color: var(--text-primary);
+}
+
+.config-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+}
+
+.config-actions .btn-icon {
+    padding: 0.375rem;
+    background: transparent;
+    border: none;
+    border-radius: 0.375rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.config-actions .btn-icon:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.config-actions .btn-icon.btn-danger:hover {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger);
+}
+
 /* Domains List */
 .domains-list {
     display: flex;
@@ -1767,6 +2137,233 @@ body {
     border-radius: 0 0 0.75rem 0.75rem;
 }
 
+/* Delete Warning Modal */
+.modal-danger .modal-header {
+    background: var(--danger-light);
+    border-bottom-color: var(--danger);
+}
+
+.modal-danger .modal-header h2 {
+    color: var(--danger);
+}
+
+.delete-warning {
+    text-align: center;
+    padding: 1rem 0;
+}
+
+.delete-warning svg {
+    color: var(--danger);
+    margin-bottom: 1rem;
+}
+
+.delete-warning .warning-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.75rem;
+}
+
+.delete-warning .warning-text {
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+}
+
+.delete-warning .warning-list {
+    text-align: left;
+    color: var(--text-secondary);
+    padding-left: 1.5rem;
+    margin: 0 auto 1.5rem;
+    max-width: 300px;
+}
+
+.delete-warning .warning-list li {
+    margin-bottom: 0.25rem;
+}
+
+.modal-footer button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Wizard Modal */
+.modal-wizard {
+    max-width: 500px;
+}
+
+.wizard-steps {
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.wizard-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.375rem;
+    opacity: 0.4;
+    transition: opacity 0.2s ease;
+}
+
+.wizard-step.active {
+    opacity: 1;
+}
+
+.wizard-step .step-number {
+    width: 1.75rem;
+    height: 1.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    border: 2px solid var(--border-color);
+}
+
+.wizard-step.current .step-number {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+
+.wizard-step .step-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.wizard-step.current .step-label {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+/* Env var list in wizard */
+.env-var-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.env-var-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-secondary);
+    border-radius: 0.375rem;
+}
+
+.env-var-item .env-key {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.env-var-item .env-value {
+    flex: 1;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+.env-var-add {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.env-var-add .input {
+    flex: 1;
+}
+
+.input-sm {
+    padding: 0.375rem 0.625rem;
+    font-size: 0.8125rem;
+}
+
+.btn-sm {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+}
+
+/* Success state in wizard */
+.success-icon {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 1rem;
+}
+
+.success-icon svg {
+    color: var(--success);
+}
+
+.text-center {
+    text-align: center;
+}
+
+.mb-4 {
+    margin-bottom: 1rem;
+}
+
+/* Deploy instructions */
+.deploy-instructions h4 {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 0.75rem;
+}
+
+.code-block {
+    position: relative;
+    background: var(--bg-tertiary);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+    overflow-x: auto;
+}
+
+.code-block code {
+    display: block;
+}
+
+.code-block .copy-btn {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    padding: 0.25rem;
+    opacity: 0.6;
+}
+
+.code-block .copy-btn:hover {
+    opacity: 1;
+}
+
+/* Modal error */
+.modal-error {
+    padding: 0.75rem 1.5rem;
+    background: var(--danger-light);
+    color: var(--danger);
+    font-size: 0.875rem;
+    border-top: 1px solid var(--danger);
+}
+
+/* Footer buttons wrapper */
+.footer-buttons {
+    display: flex;
+    gap: 0.75rem;
+    width: 100%;
+    justify-content: flex-end;
+}
+
 /* Addon Options */
 .addon-options {
     display: grid;
@@ -1834,6 +2431,162 @@ body {
     color: var(--text-secondary);
     margin-bottom: 1rem;
     font-size: 0.875rem;
+}
+
+.danger-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 0;
+    border-bottom: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.danger-item:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.danger-item:first-child {
+    padding-top: 0;
+}
+
+.danger-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.danger-info strong {
+    color: var(--text-primary);
+    font-size: 0.875rem;
+}
+
+.danger-info small {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+
+.btn-outline-danger {
+    background: transparent;
+    border: 1px solid var(--danger);
+    color: var(--danger);
+}
+
+.btn-outline-danger:hover:not(:disabled) {
+    background: var(--danger);
+    color: white;
+}
+
+/* Settings Form */
+.settings-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.form-row {
+    display: flex;
+    gap: 1.5rem;
+}
+
+.form-row.two-col > .form-group {
+    flex: 1;
+}
+
+.form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding-top: 0.5rem;
+}
+
+/* Settings row with toggle */
+.settings-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+}
+
+.settings-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.settings-info strong {
+    font-size: 0.875rem;
+    color: var(--text-primary);
+}
+
+.settings-info small {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* Scale display */
+.scale-display {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+
+.scale-value {
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.scale-label {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+/* Toggle switch */
+.toggle {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 26px;
+    flex-shrink: 0;
+}
+
+.toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--bg-tertiary);
+    border-radius: 26px;
+    transition: 0.2s;
+}
+
+.toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 20px;
+    width: 20px;
+    left: 3px;
+    bottom: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: 0.2s;
+}
+
+.toggle input:checked + .toggle-slider {
+    background: var(--primary);
+}
+
+.toggle input:checked + .toggle-slider:before {
+    transform: translateX(22px);
 }
 
 /* Toast */
@@ -2126,6 +2879,9 @@ function dashboard() {
         showModal: null,
         currentApp: null,
         breadcrumbs: [],
+        deleteConfirmInput: '',
+        editingConfigKey: '',
+        editingConfigValue: '',
 
         init() {
             document.body.classList.add(this.theme);
@@ -2296,6 +3052,54 @@ function dashboard() {
                 showToast('Domain added! Configure DNS to complete setup.', 'success');
                 htmx.trigger('#domains-list', 'htmx:trigger');
             }
+        },
+
+        handleConfigUpdated(event) {
+            if (event.detail.successful) {
+                this.showModal = null;
+                this.editingConfigKey = '';
+                this.editingConfigValue = '';
+                showToast('Config variable updated!', 'success');
+                htmx.trigger('#config-list', 'htmx:trigger');
+            }
+        },
+
+        openEditConfig(key, value) {
+            this.editingConfigKey = key;
+            this.editingConfigValue = value;
+            this.showModal = 'edit-config';
+        },
+
+        deleteApp() {
+            if (this.deleteConfirmInput !== this.currentApp) return;
+
+            fetch(`/apps/${this.currentApp}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(response => {
+                if (response.ok) {
+                    showToast('App deleted successfully', 'success');
+                    this.showModal = null;
+                    this.deleteConfirmInput = '';
+                    this.currentApp = null;
+                    this.breadcrumbs = [];
+                    htmx.ajax('GET', '/dashboard/apps', '#main-content');
+                    history.pushState({}, '', '/dashboard');
+                } else {
+                    response.json().then(data => {
+                        showToast(data.error || 'Failed to delete app', 'error');
+                    });
+                }
+            })
+            .catch(() => {
+                showToast('Failed to delete app', 'error');
+            });
+        },
+
+        confirmDeleteApp() {
+            this.deleteConfirmInput = '';
+            this.showModal = 'delete-app';
         }
     };
 }
@@ -2540,7 +3344,7 @@ mod tests {
         let html = render_config_vars(&config);
         assert!(html.contains("DATABASE_URL"));
         assert!(html.contains("API_KEY"));
-        assert!(html.contains("--------")); // API_KEY should be masked
+        assert!(html.contains("••••••••")); // API_KEY should be masked
     }
 
     #[test]

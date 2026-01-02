@@ -77,12 +77,12 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Dark/light theme support
 - [x] Navigation with breadcrumbs
 
-### Phase 2: App Management
-- [ ] App dashboard with status cards
-- [ ] Create app wizard
-- [ ] App settings page
-- [ ] Environment variables editor (with secret masking)
-- [ ] Delete app with confirmation
+### Phase 2: App Management ✅
+- [x] App dashboard with status cards
+- [x] Create app wizard (multi-step with env vars)
+- [x] App settings page (port, scaling, maintenance mode)
+- [x] Environment variables editor (with secret masking, visibility toggle)
+- [x] Delete app with confirmation (type-to-confirm safety)
 
 ### Phase 3: Deployments & Logs
 - [ ] Real-time deployment progress
