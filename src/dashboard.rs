@@ -205,45 +205,293 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
     </div>
 </div>
 
-<div class="tab-content" x-show="activeTab === 'deploy'">
-    <div class="card">
+<div class="tab-content" x-show="activeTab === 'deploy'" x-data="{{
+    deploying: false,
+    deploymentId: null,
+    deployProgress: null,
+    pollInterval: null,
+    async startDeploy(event) {{
+        event.preventDefault();
+        const form = event.target;
+        const formData = new FormData(form);
+        this.deploying = true;
+        this.deployProgress = {{ status: 'pending', step: 'Initializing...', logs: [] }};
+        try {{
+            const res = await fetch('/apps/{0}/deploy', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{
+                    git_url: formData.get('git_url'),
+                    git_ref: formData.get('git_ref')
+                }})
+            }});
+            const data = await res.json();
+            if (data.success && data.data) {{
+                this.deploymentId = data.data.id || data.data.deployment_id;
+                this.startPolling();
+            }} else {{
+                this.deployProgress = {{ status: 'failed', step: data.error || 'Failed to start deployment', logs: [] }};
+                this.deploying = false;
+            }}
+        }} catch (e) {{
+            this.deployProgress = {{ status: 'failed', step: 'Network error', logs: [] }};
+            this.deploying = false;
+        }}
+    }},
+    startPolling() {{
+        this.pollInterval = setInterval(async () => {{
+            try {{
+                const res = await fetch('/apps/{0}/deployments/' + this.deploymentId);
+                const data = await res.json();
+                if (data.success && data.data) {{
+                    const d = data.data;
+                    this.deployProgress = {{
+                        status: d.status,
+                        step: this.getStepFromStatus(d.status),
+                        image: d.image,
+                        duration: d.duration_secs,
+                        logs: d.build_logs ? d.build_logs.split('\\n').slice(-20) : []
+                    }};
+                    if (d.status === 'success' || d.status === 'failed') {{
+                        this.stopPolling();
+                        htmx.trigger('#deployments-list', 'reload');
+                    }}
+                }}
+            }} catch (e) {{ }}
+        }}, 2000);
+    }},
+    stopPolling() {{
+        if (this.pollInterval) {{
+            clearInterval(this.pollInterval);
+            this.pollInterval = null;
+        }}
+        this.deploying = false;
+    }},
+    getStepFromStatus(status) {{
+        switch(status) {{
+            case 'pending': return 'Queued...';
+            case 'cloning': return 'Cloning repository...';
+            case 'building': return 'Building image...';
+            case 'pushing': return 'Pushing to registry...';
+            case 'deploying': return 'Deploying containers...';
+            case 'success': return 'Deployment complete!';
+            case 'failed': return 'Deployment failed';
+            default: return status;
+        }}
+    }},
+    closeDeploy() {{
+        this.stopPolling();
+        this.deployProgress = null;
+        this.deploymentId = null;
+    }}
+}}">
+    <!-- Active Deployment Progress -->
+    <div class="card deploy-progress-card" x-show="deployProgress" x-cloak>
+        <div class="card-header">
+            <h2>Deployment in Progress</h2>
+            <button class="btn btn-icon" @click="closeDeploy()" x-show="!deploying" title="Close">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+        </div>
+        <div class="deploy-progress">
+            <div class="deploy-status" :class="'deploy-status-' + (deployProgress?.status || 'pending')">
+                <div class="deploy-status-icon">
+                    <svg x-show="deploying" class="spinner" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                    </svg>
+                    <svg x-show="deployProgress?.status === 'success'" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <svg x-show="deployProgress?.status === 'failed'" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </div>
+                <div class="deploy-status-text">
+                    <span class="deploy-step" x-text="deployProgress?.step"></span>
+                    <span class="deploy-duration" x-show="deployProgress?.duration" x-text="deployProgress?.duration?.toFixed(1) + 's'"></span>
+                </div>
+            </div>
+            <div class="deploy-progress-bar" x-show="deploying">
+                <div class="deploy-progress-fill"></div>
+            </div>
+            <div class="deploy-logs" x-show="deployProgress?.logs?.length > 0">
+                <div class="deploy-logs-header">Build Output</div>
+                <pre class="deploy-logs-content"><template x-for="line in deployProgress?.logs || []"><span x-text="line + '\\n'"></span></template></pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" x-show="!deployProgress">
         <h2>Deploy from Git</h2>
-        <form hx-post="/apps/{0}/deploy" hx-swap="none" hx-on::after-request="showToast('Deployment started!', 'success')">
+        <form @submit.prevent="startDeploy($event)" class="deploy-form">
             <div class="form-group">
                 <label for="git-url">Git Repository URL</label>
                 <input type="url" id="git-url" name="git_url" placeholder="https://github.com/user/repo.git" value="{6}" class="input">
+                <small>HTTPS or SSH URL to your repository</small>
             </div>
             <div class="form-group">
                 <label for="git-ref">Branch/Tag/Commit</label>
                 <input type="text" id="git-ref" name="git_ref" placeholder="main" value="main" class="input">
+                <small>Branch name, tag, or commit SHA</small>
             </div>
-            <button type="submit" class="btn btn-primary">Deploy</button>
+            <button type="submit" class="btn btn-primary" :disabled="deploying">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                </svg>
+                Deploy
+            </button>
         </form>
     </div>
+
     <div class="card">
-        <h2>Recent Deployments</h2>
-        <div id="deployments-list" hx-get="/dashboard/apps/{0}/deployments" hx-trigger="load" hx-swap="innerHTML">
+        <div class="card-header">
+            <h2>Deployment History</h2>
+            <button class="btn btn-secondary btn-sm" hx-get="/dashboard/apps/{0}/deployments" hx-target="#deployments-list" hx-swap="innerHTML">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                </svg>
+                Refresh
+            </button>
+        </div>
+        <div id="deployments-list" hx-get="/dashboard/apps/{0}/deployments" hx-trigger="load, reload from:body" hx-swap="innerHTML">
             <div class="loading">Loading deployments...</div>
         </div>
     </div>
 </div>
 
-<div class="tab-content" x-show="activeTab === 'logs'">
+<div class="tab-content" x-show="activeTab === 'logs'" x-data="{{
+    logSource: 'all',
+    logLevel: 'all',
+    searchQuery: '',
+    followLogs: true,
+    allLogs: [],
+    filteredLogs: [],
+    init() {{
+        this.loadLogs();
+        this.$watch('logSource', () => this.filterLogs());
+        this.$watch('logLevel', () => this.filterLogs());
+        this.$watch('searchQuery', () => this.filterLogs());
+    }},
+    async loadLogs() {{
+        try {{
+            const res = await fetch('/dashboard/apps/{0}/logs?limit=500');
+            const data = await res.json();
+            if (data.logs) {{
+                this.allLogs = data.logs;
+                this.filterLogs();
+            }}
+        }} catch (e) {{ }}
+        if (this.followLogs) {{
+            setTimeout(() => this.loadLogs(), 2000);
+        }}
+    }},
+    filterLogs() {{
+        this.filteredLogs = this.allLogs.filter(log => {{
+            if (this.logSource !== 'all' && log.source !== this.logSource) return false;
+            if (this.logLevel !== 'all' && log.level !== this.logLevel) return false;
+            if (this.searchQuery && !log.message.toLowerCase().includes(this.searchQuery.toLowerCase())) return false;
+            return true;
+        }});
+    }},
+    toggleFollow() {{
+        this.followLogs = !this.followLogs;
+        if (this.followLogs) this.loadLogs();
+    }},
+    clearLogs() {{
+        this.allLogs = [];
+        this.filteredLogs = [];
+    }},
+    downloadLogs() {{
+        const content = this.filteredLogs.map(l => `[${{l.timestamp}}] [${{l.source}}] [${{l.level}}] ${{l.message}}`).join('\\n');
+        const blob = new Blob([content], {{ type: 'text/plain' }});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '{0}-logs-' + new Date().toISOString().slice(0,10) + '.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('Logs downloaded', 'success');
+    }},
+    getLogClass(level) {{
+        switch(level) {{
+            case 'error': return 'log-error';
+            case 'warn': return 'log-warn';
+            case 'info': return 'log-info';
+            case 'debug': return 'log-debug';
+            default: return '';
+        }}
+    }}
+}}">
     <div class="card logs-card">
         <div class="card-header">
             <h2>Application Logs</h2>
-            <div class="logs-controls">
-                <select class="select" id="log-source">
+            <div class="logs-toolbar">
+                <div class="logs-search">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                    <input type="text" x-model="searchQuery" placeholder="Search logs..." class="input input-sm">
+                </div>
+                <select class="select select-sm" x-model="logSource">
                     <option value="all">All Sources</option>
                     <option value="app">App</option>
                     <option value="router">Router</option>
                     <option value="build">Build</option>
+                    <option value="dyno">Dyno</option>
                 </select>
-                <button class="btn btn-secondary" onclick="clearLogs()">Clear</button>
-                <button class="btn btn-secondary" id="logs-follow-btn" onclick="toggleLogsFollow()">Follow</button>
+                <select class="select select-sm" x-model="logLevel">
+                    <option value="all">All Levels</option>
+                    <option value="error">Error</option>
+                    <option value="warn">Warning</option>
+                    <option value="info">Info</option>
+                    <option value="debug">Debug</option>
+                </select>
             </div>
         </div>
-        <div class="logs-container" id="logs-container" hx-get="/dashboard/apps/{0}/logs/stream" hx-trigger="load, every 2s[followLogs]" hx-swap="beforeend"></div>
+        <div class="logs-actions">
+            <span class="logs-count" x-text="filteredLogs.length + ' logs'"></span>
+            <div class="logs-buttons">
+                <button class="btn btn-secondary btn-sm" @click="clearLogs()">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                    </svg>
+                    Clear
+                </button>
+                <button class="btn btn-secondary btn-sm" @click="downloadLogs()">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                    </svg>
+                    Download
+                </button>
+                <button class="btn btn-sm" :class="followLogs ? 'btn-primary' : 'btn-secondary'" @click="toggleFollow()">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/>
+                    </svg>
+                    <span x-text="followLogs ? 'Following' : 'Follow'"></span>
+                </button>
+            </div>
+        </div>
+        <div class="logs-container" id="logs-container">
+            <template x-if="filteredLogs.length === 0">
+                <div class="logs-empty">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                    <p x-show="allLogs.length === 0">No logs yet</p>
+                    <p x-show="allLogs.length > 0">No logs match your filters</p>
+                </div>
+            </template>
+            <template x-for="log in filteredLogs" :key="log.id || log.timestamp">
+                <div class="log-line" :class="getLogClass(log.level)">
+                    <span class="log-timestamp" x-text="log.timestamp"></span>
+                    <span class="log-source" x-text="log.source"></span>
+                    <span class="log-level" x-text="log.level"></span>
+                    <span class="log-message" x-text="log.message"></span>
+                </div>
+            </template>
+        </div>
     </div>
 </div>
 
@@ -515,34 +763,88 @@ pub fn render_addons_list(addons: &[serde_json::Value]) -> String {
 /// Generate HTML for deployments list
 pub fn render_deployments_list(deployments: &[serde_json::Value]) -> String {
     if deployments.is_empty() {
-        return r##"<div class="empty-state small">No deployments yet</div>"##.to_string();
+        return r##"<div class="empty-state small">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+            </svg>
+            <p>No deployments yet</p>
+            <p class="text-muted">Deploy your app using git push or the form above</p>
+        </div>"##.to_string();
     }
 
-    let items: Vec<String> = deployments.iter().take(10).map(|deploy| {
+    let items: Vec<String> = deployments.iter().enumerate().take(10).map(|(idx, deploy)| {
+        let id = deploy["id"].as_str().unwrap_or("");
         let status = deploy["status"].as_str().unwrap_or("pending");
         let image = deploy["image"].as_str().unwrap_or("N/A");
-        let duration = deploy["duration_secs"].as_f64().map(|d| format!("{:.1}s", d)).unwrap_or_default();
+        let commit = deploy["commit_hash"].as_str().map(|c| if c.len() > 7 { &c[..7] } else { c }).unwrap_or("");
+        let duration = deploy["duration_secs"].as_f64().map(|d| format!("{:.1}s", d)).unwrap_or_else(|| "-".to_string());
         let created = deploy["created_at"].as_str().unwrap_or("");
 
         let status_class = match status {
             "success" => "status-running",
-            "building" | "pending" => "status-building",
+            "building" | "pending" | "cloning" | "pushing" | "deploying" => "status-building",
             "failed" => "status-failed",
             _ => "status-idle",
         };
 
+        let status_icon = match status {
+            "success" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##,
+            "building" | "pending" | "cloning" | "pushing" | "deploying" => r##"<svg class="spinner" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>"##,
+            "failed" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##,
+            _ => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##,
+        };
+
+        let is_current = idx == 0 && status == "success";
+        let current_badge = if is_current { r##"<span class="badge badge-current">current</span>"## } else { "" };
+
+        let rollback_btn = if !is_current && status == "success" && !image.is_empty() && image != "N/A" {
+            format!(
+                r##"<button class="btn btn-sm btn-secondary"
+                    hx-post="/apps/current/rollback"
+                    hx-vals='{{"deployment_id": "{0}"}}'
+                    hx-confirm="Rollback to this deployment?"
+                    hx-swap="none"
+                    hx-on::after-request="showToast('Rollback initiated', 'success'); htmx.trigger('#deployments-list', 'reload')">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/>
+                    </svg>
+                    Rollback
+                </button>"##,
+                id
+            )
+        } else {
+            String::new()
+        };
+
+        let commit_display = if !commit.is_empty() {
+            format!(r##"<span class="deployment-commit" title="Commit">{0}</span>"##, commit)
+        } else {
+            String::new()
+        };
+
         format!(
-            r##"<div class="deployment-item">
-            <div class="deployment-info">
-                <span class="status-badge {0}">{1}</span>
-                <span class="deployment-image">{2}</span>
+            r##"<div class="deployment-item" data-deployment-id="{0}">
+            <div class="deployment-main">
+                <div class="deployment-status {1}">
+                    {2}
+                </div>
+                <div class="deployment-info">
+                    <div class="deployment-header">
+                        <span class="deployment-image">{3}</span>
+                        {4}
+                        {5}
+                    </div>
+                    <div class="deployment-meta">
+                        <span class="deployment-time">{6}</span>
+                        <span class="deployment-duration">{7}</span>
+                    </div>
+                </div>
             </div>
-            <div class="deployment-meta">
-                <span class="deployment-duration">{3}</span>
-                <span class="deployment-time">{4}</span>
+            <div class="deployment-actions">
+                {8}
             </div>
         </div>"##,
-            status_class, status, image, duration, created
+            id, status_class, status_icon, image, commit_display, current_badge, created, duration, rollback_btn
         )
     }).collect();
 
@@ -2012,14 +2314,57 @@ body {
     min-height: 400px;
 }
 
-.logs-controls {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
+.logs-card .card-header {
+    flex-direction: column;
+    gap: 0.75rem;
+    align-items: stretch;
 }
 
-.logs-controls .select {
-    width: auto;
+.logs-toolbar {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.logs-search {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 150px;
+    background: var(--bg-secondary);
+    border-radius: 0.375rem;
+    padding: 0 0.5rem;
+}
+
+.logs-search svg {
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.logs-search .input {
+    border: none;
+    background: transparent;
+    padding-left: 0;
+}
+
+.logs-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 0.5rem;
+}
+
+.logs-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.logs-buttons {
+    display: flex;
+    gap: 0.5rem;
 }
 
 .logs-container {
@@ -2030,29 +2375,295 @@ body {
     overflow-y: auto;
     font-family: 'SF Mono', Monaco, Consolas, monospace;
     font-size: 0.8125rem;
-    line-height: 1.7;
+    line-height: 1.5;
     color: #e2e8f0;
 }
 
+.logs-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #64748b;
+    gap: 0.5rem;
+}
+
 .log-line {
-    white-space: pre-wrap;
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.log-line:hover {
+    background: rgba(255,255,255,0.02);
+}
+
+.log-timestamp {
+    color: #64748b;
+    flex-shrink: 0;
+    font-size: 0.75rem;
+}
+
+.log-source {
+    color: #a78bfa;
+    flex-shrink: 0;
+    min-width: 50px;
+    font-size: 0.75rem;
+}
+
+.log-level {
+    flex-shrink: 0;
+    min-width: 40px;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    font-weight: 500;
+}
+
+.log-message {
+    flex: 1;
     word-break: break-all;
 }
 
-.log-line.error {
+.log-error .log-level,
+.log-error .log-message {
     color: #fca5a5;
 }
 
-.log-line.warn {
+.log-warn .log-level,
+.log-warn .log-message {
     color: #fcd34d;
 }
 
-.log-line .timestamp {
-    color: #64748b;
+.log-info .log-level {
+    color: #93c5fd;
 }
 
-.log-line .source {
-    color: #a78bfa;
+.log-debug .log-level {
+    color: #86efac;
+}
+
+.select-sm {
+    padding: 0.375rem 0.625rem;
+    font-size: 0.8125rem;
+}
+
+/* Deployment Progress */
+.deploy-progress-card {
+    border: 2px solid var(--primary);
+}
+
+.deploy-progress {
+    padding: 1rem 0;
+}
+
+.deploy-status {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.deploy-status-icon {
+    flex-shrink: 0;
+}
+
+.deploy-status-icon svg {
+    color: var(--primary);
+}
+
+.deploy-status-success .deploy-status-icon svg {
+    color: var(--success);
+}
+
+.deploy-status-failed .deploy-status-icon svg {
+    color: var(--danger);
+}
+
+.deploy-status-text {
+    flex: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.deploy-step {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.deploy-duration {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.deploy-progress-bar {
+    height: 4px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 1rem;
+}
+
+.deploy-progress-fill {
+    height: 100%;
+    width: 30%;
+    background: var(--primary);
+    border-radius: 2px;
+    animation: progress-indeterminate 1.5s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+    0% { transform: translateX(-100%); width: 30%; }
+    50% { transform: translateX(100%); width: 60%; }
+    100% { transform: translateX(300%); width: 30%; }
+}
+
+.deploy-logs {
+    background: #0f172a;
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+.deploy-logs-header {
+    padding: 0.5rem 1rem;
+    background: #1e293b;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.deploy-logs-content {
+    padding: 1rem;
+    margin: 0;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: #e2e8f0;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.deploy-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.deploy-form .btn {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* Spinner animation */
+.spinner {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Enhanced Deployments List */
+.deployment-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.875rem 1rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    gap: 1rem;
+}
+
+.deployment-main {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    flex: 1;
+    min-width: 0;
+}
+
+.deployment-status {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+}
+
+.deployment-status.status-running svg {
+    color: var(--success);
+}
+
+.deployment-status.status-building svg {
+    color: var(--primary);
+}
+
+.deployment-status.status-failed svg {
+    color: var(--danger);
+}
+
+.deployment-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.deployment-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.deployment-image {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.deployment-commit {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.badge-current {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    padding: 0.125rem 0.375rem;
+    background: var(--success);
+    color: white;
+    border-radius: 0.25rem;
+}
+
+.deployment-meta {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+.deployment-actions {
+    flex-shrink: 0;
 }
 
 /* Modal */
@@ -3409,9 +4020,10 @@ mod tests {
             })
         ];
         let html = render_deployments_list(&deployments);
-        assert!(html.contains("success"));
+        assert!(html.contains("status-running")); // success status class
         assert!(html.contains("app:v1.2.3"));
         assert!(html.contains("45.5s"));
+        assert!(html.contains("badge-current")); // first successful deploy is current
     }
 
     #[test]

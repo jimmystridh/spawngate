@@ -84,13 +84,13 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Environment variables editor (with secret masking, visibility toggle)
 - [x] Delete app with confirmation (type-to-confirm safety)
 
-### Phase 3: Deployments & Logs
-- [ ] Real-time deployment progress
-- [ ] Deployment history with diffs
-- [ ] One-click rollback
-- [ ] Live log streaming (WebSocket)
-- [ ] Log search and filtering
-- [ ] Log download
+### Phase 3: Deployments & Logs ✅
+- [x] Real-time deployment progress (polling with status updates, build logs)
+- [x] Deployment history with details (status icons, commit hash, current badge)
+- [x] One-click rollback (rollback button on successful deployments)
+- [x] Live log streaming (auto-refresh with follow mode)
+- [x] Log search and filtering (by source, level, and text search)
+- [x] Log download (export filtered logs as text file)
 
 ### Phase 4: Scaling & Processes
 - [ ] Visual dyno manager (slider/input)
