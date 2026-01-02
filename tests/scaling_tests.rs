@@ -1,6 +1,6 @@
 //! Integration tests for horizontal scaling functionality
 //!
-//! Tests the DynoManager, LoadBalancer, HealthChecker, and related API endpoints.
+//! Tests the InstanceManager, LoadBalancer, HealthChecker, and related API endpoints.
 
 use spawngate::db::Database;
 use spawngate::loadbalancer::LoadBalancerManager;
@@ -69,7 +69,7 @@ mod db_scaling_tests {
 
         // Create process record
         let process = ProcessRecord {
-            id: "dyno-1".to_string(),
+            id: "instance-1".to_string(),
             app_name: "test-app".to_string(),
             process_type: "web".to_string(),
             container_id: Some("container-abc".to_string()),
@@ -85,11 +85,11 @@ mod db_scaling_tests {
         // Verify process exists
         let processes = db.get_app_processes("test-app").unwrap();
         assert_eq!(processes.len(), 1);
-        assert_eq!(processes[0].id, "dyno-1");
+        assert_eq!(processes[0].id, "instance-1");
         assert_eq!(processes[0].status, "running");
 
         // Update process status
-        db.update_process_status("dyno-1", "stopped").unwrap();
+        db.update_process_status("instance-1", "stopped").unwrap();
 
         let processes = db.get_app_processes("test-app").unwrap();
         assert_eq!(processes[0].status, "stopped");
@@ -104,7 +104,7 @@ mod db_scaling_tests {
         // Create multiple processes
         for i in 1..=3 {
             let process = ProcessRecord {
-                id: format!("dyno-{}", i),
+                id: format!("instance-{}", i),
                 app_name: "test-app".to_string(),
                 process_type: "web".to_string(),
                 container_id: Some(format!("container-{}", i)),
@@ -127,7 +127,7 @@ mod db_scaling_tests {
         assert_eq!(count, 3);
 
         // Stop one process
-        db.update_process_status("dyno-2", "stopped").unwrap();
+        db.update_process_status("instance-2", "stopped").unwrap();
 
         // Count should reflect only running processes
         let count = db.get_running_process_count("test-app").unwrap();
@@ -141,7 +141,7 @@ mod db_scaling_tests {
         db.create_app(&app).unwrap();
 
         let process = ProcessRecord {
-            id: "dyno-1".to_string(),
+            id: "instance-1".to_string(),
             app_name: "test-app".to_string(),
             process_type: "web".to_string(),
             container_id: Some("container-abc".to_string()),
@@ -155,7 +155,7 @@ mod db_scaling_tests {
         db.create_process(&process).unwrap();
 
         // Update health status
-        db.update_process_health("dyno-1", "healthy").unwrap();
+        db.update_process_health("instance-1", "healthy").unwrap();
 
         let processes = db.get_app_processes("test-app").unwrap();
         assert_eq!(processes[0].health_status, Some("healthy".to_string()));
@@ -170,7 +170,7 @@ mod db_scaling_tests {
 
         // Create process
         let process = ProcessRecord {
-            id: "dyno-1".to_string(),
+            id: "instance-1".to_string(),
             app_name: "test-app".to_string(),
             process_type: "web".to_string(),
             container_id: None,
@@ -204,9 +204,9 @@ mod loadbalancer_tests {
         let manager = LoadBalancerManager::default();
 
         // Add backends for multiple apps
-        manager.add_backend("app1", "dyno-1", 10001).await;
-        manager.add_backend("app1", "dyno-2", 10002).await;
-        manager.add_backend("app2", "dyno-3", 10003).await;
+        manager.add_backend("app1", "instance-1", 10001).await;
+        manager.add_backend("app1", "instance-2", 10002).await;
+        manager.add_backend("app2", "instance-3", 10003).await;
 
         // Verify apps are tracked
         let apps = manager.list_apps().await;
@@ -233,15 +233,15 @@ mod loadbalancer_tests {
     async fn test_loadbalancer_backend_removal() {
         let manager = LoadBalancerManager::default();
 
-        manager.add_backend("app1", "dyno-1", 10001).await;
-        manager.add_backend("app1", "dyno-2", 10002).await;
+        manager.add_backend("app1", "instance-1", 10001).await;
+        manager.add_backend("app1", "instance-2", 10002).await;
 
         // Both backends available
         let lb = manager.get("app1").await.unwrap();
         assert_eq!(lb.total_count().await, 2);
 
         // Remove one backend
-        manager.remove_backend("app1", "dyno-1").await;
+        manager.remove_backend("app1", "instance-1").await;
 
         assert_eq!(lb.total_count().await, 1);
 
@@ -254,13 +254,13 @@ mod loadbalancer_tests {
     async fn test_loadbalancer_health_status() {
         let manager = LoadBalancerManager::default();
 
-        manager.add_backend("app1", "dyno-1", 10001).await;
-        manager.add_backend("app1", "dyno-2", 10002).await;
+        manager.add_backend("app1", "instance-1", 10001).await;
+        manager.add_backend("app1", "instance-2", 10002).await;
 
         let lb = manager.get("app1").await.unwrap();
 
         // Mark one backend unhealthy
-        lb.set_backend_health("dyno-1", false).await;
+        lb.set_backend_health("instance-1", false).await;
 
         assert_eq!(lb.healthy_count().await, 1);
         assert_eq!(lb.total_count().await, 2);
@@ -272,7 +272,7 @@ mod loadbalancer_tests {
         }
 
         // Mark it healthy again
-        lb.set_backend_health("dyno-1", true).await;
+        lb.set_backend_health("instance-1", true).await;
 
         assert_eq!(lb.healthy_count().await, 2);
     }
@@ -281,10 +281,10 @@ mod loadbalancer_tests {
     async fn test_loadbalancer_all_unhealthy() {
         let manager = LoadBalancerManager::default();
 
-        manager.add_backend("app1", "dyno-1", 10001).await;
+        manager.add_backend("app1", "instance-1", 10001).await;
 
         let lb = manager.get("app1").await.unwrap();
-        lb.set_backend_health("dyno-1", false).await;
+        lb.set_backend_health("instance-1", false).await;
 
         // No healthy backends should return None
         let port = manager.get_next_port("app1").await;
@@ -295,9 +295,9 @@ mod loadbalancer_tests {
     async fn test_loadbalancer_get_all_ports() {
         let manager = LoadBalancerManager::default();
 
-        manager.add_backend("app1", "dyno-1", 10001).await;
-        manager.add_backend("app1", "dyno-2", 10002).await;
-        manager.add_backend("app1", "dyno-3", 10003).await;
+        manager.add_backend("app1", "instance-1", 10001).await;
+        manager.add_backend("app1", "instance-2", 10002).await;
+        manager.add_backend("app1", "instance-3", 10003).await;
 
         let lb = manager.get("app1").await.unwrap();
         let all_ports = lb.get_all_ports().await;
@@ -346,17 +346,17 @@ mod healthcheck_tests {
 }
 
 // ============================================================================
-// Dyno/Rolling Deploy Result Tests
+// Instance/Rolling Deploy Result Tests
 // ============================================================================
 
-mod dyno_tests {
-    use spawngate::dyno::RollingDeployResult;
+mod instance_tests {
+    use spawngate::instance::RollingDeployResult;
 
     #[test]
     fn test_rolling_deploy_result_success() {
         let result = RollingDeployResult {
             app_name: "test-app".to_string(),
-            total_dynos: 3,
+            total_instances: 3,
             successful: 3,
             failed: 0,
         };
@@ -368,7 +368,7 @@ mod dyno_tests {
     fn test_rolling_deploy_result_partial_failure() {
         let result = RollingDeployResult {
             app_name: "test-app".to_string(),
-            total_dynos: 3,
+            total_instances: 3,
             successful: 2,
             failed: 1,
         };
@@ -377,10 +377,10 @@ mod dyno_tests {
     }
 
     #[test]
-    fn test_rolling_deploy_result_no_dynos() {
+    fn test_rolling_deploy_result_no_instances() {
         let result = RollingDeployResult {
             app_name: "test-app".to_string(),
-            total_dynos: 0,
+            total_instances: 0,
             successful: 0,
             failed: 0,
         };
@@ -392,29 +392,29 @@ mod dyno_tests {
     fn test_rolling_deploy_result_serialization() {
         let result = RollingDeployResult {
             app_name: "test-app".to_string(),
-            total_dynos: 2,
+            total_instances: 2,
             successful: 2,
             failed: 0,
         };
 
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"app_name\":\"test-app\""));
-        assert!(json.contains("\"total_dynos\":2"));
+        assert!(json.contains("\"total_instances\":2"));
         assert!(json.contains("\"successful\":2"));
         assert!(json.contains("\"failed\":0"));
     }
 }
 
 // ============================================================================
-// DynoConfig Tests
+// InstanceConfig Tests
 // ============================================================================
 
-mod dyno_config_tests {
-    use spawngate::dyno::DynoConfig;
+mod instance_config_tests {
+    use spawngate::instance::InstanceConfig;
 
     #[test]
-    fn test_dyno_config_default() {
-        let config = DynoConfig::default();
+    fn test_instance_config_default() {
+        let config = InstanceConfig::default();
 
         assert_eq!(config.network, "spawngate");
         assert!(config.health_check_url.is_none());
@@ -423,8 +423,8 @@ mod dyno_config_tests {
     }
 
     #[test]
-    fn test_dyno_config_custom() {
-        let config = DynoConfig {
+    fn test_instance_config_custom() {
+        let config = InstanceConfig {
             network: "custom-network".to_string(),
             health_check_url: Some("http://localhost:9999".to_string()),
             memory_limit: Some("1g".to_string()),
@@ -447,7 +447,7 @@ mod integrated_tests {
 
     #[tokio::test]
     async fn test_db_and_loadbalancer_sync() {
-        // Simulate what DynoManager does: create process record and register with LB
+        // Simulate what InstanceManager does: create process record and register with LB
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("test.db");
         let db = Database::open(&db_path).unwrap();
@@ -469,14 +469,14 @@ mod integrated_tests {
         };
         db.create_app(&app).unwrap();
 
-        // Simulate spawning 2 dynos
+        // Simulate spawning 2 instances
         for i in 1..=2 {
-            let dyno_id = format!("dyno-{}", i);
+            let instance_id = format!("instance-{}", i);
             let port = 10000 + i as i32;
 
             // Record in database
             let process = ProcessRecord {
-                id: dyno_id.clone(),
+                id: instance_id.clone(),
                 app_name: "myapp".to_string(),
                 process_type: "web".to_string(),
                 container_id: Some(format!("container-{}", i)),
@@ -490,7 +490,7 @@ mod integrated_tests {
             db.create_process(&process).unwrap();
 
             // Register with load balancer
-            lb_manager.add_backend("myapp", &dyno_id, port as u16).await;
+            lb_manager.add_backend("myapp", &instance_id, port as u16).await;
         }
 
         // Verify DB state
@@ -502,11 +502,11 @@ mod integrated_tests {
         assert_eq!(lb.total_count().await, 2);
         assert_eq!(lb.healthy_count().await, 2);
 
-        // Simulate stopping a dyno
-        lb_manager.remove_backend("myapp", "dyno-1").await;
-        db.update_process_status("dyno-1", "stopped").unwrap();
+        // Simulate stopping a instance
+        lb_manager.remove_backend("myapp", "instance-1").await;
+        db.update_process_status("instance-1", "stopped").unwrap();
 
-        // LB should only route to remaining dyno
+        // LB should only route to remaining instance
         let port = lb_manager.get_next_port("myapp").await;
         assert_eq!(port, Some(10002));
 

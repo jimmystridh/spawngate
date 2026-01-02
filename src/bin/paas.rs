@@ -1238,7 +1238,7 @@ fn handle_scale(opts: ScaleOptions) -> Result<()> {
                 println!();
                 println!("  web: {}", app.scale);
                 println!();
-                println!("Use 'paas scale web=N' to change dyno count");
+                println!("Use 'paas scale web=N' to change instance count");
             }
         } else {
             println!("Failed to get app info: {}", result.error.unwrap_or_default());
@@ -1268,14 +1268,14 @@ fn handle_scale(opts: ScaleOptions) -> Result<()> {
             if result.success {
                 println!();
                 if *count == 0 {
-                    println!("App {} scaled down to 0 dynos (idle)", current_app);
+                    println!("App {} scaled down to 0 instances (idle)", current_app);
                     println!("The app will start when it receives traffic");
                 } else {
                     println!("App {} scaled to {} {} {}",
                         current_app,
                         count,
                         process_type,
-                        if *count == 1 { "dyno" } else { "dynos" }
+                        if *count == 1 { "instance" } else { "instances" }
                     );
                 }
             } else {
@@ -1338,7 +1338,7 @@ fn handle_ps(opts: PsOptions) -> Result<()> {
 #[derive(Debug, Deserialize)]
 struct RollingDeployResult {
     app_name: String,
-    total_dynos: usize,
+    total_instances: usize,
     successful: usize,
     failed: usize,
 }
@@ -1352,7 +1352,7 @@ fn handle_restart(opts: RestartOptions) -> Result<()> {
         return Ok(());
     }
 
-    println!("Restarting all dynos for {}...", app);
+    println!("Restarting all instances for {}...", app);
     println!();
 
     let response = client.post(&format!("/apps/{}/restart", app), "{}")?;
@@ -1361,14 +1361,14 @@ fn handle_restart(opts: RestartOptions) -> Result<()> {
 
     if result.success {
         if let Some(deploy) = result.data {
-            if deploy.total_dynos == 0 {
-                println!("No running dynos to restart.");
+            if deploy.total_instances == 0 {
+                println!("No running instances to restart.");
                 println!("Scale up your app with 'paas scale web=1'");
             } else if deploy.failed == 0 {
                 println!("✓ Rolling deploy complete!");
                 println!("  {} {} restarted successfully",
                     deploy.successful,
-                    if deploy.successful == 1 { "dyno" } else { "dynos" }
+                    if deploy.successful == 1 { "instance" } else { "instances" }
                 );
             } else {
                 println!("⚠ Rolling deploy completed with errors");
@@ -1897,7 +1897,7 @@ COMMANDS:
 
     scale [type=N ...]       Scale app processes (e.g., web=3)
     ps                       List running processes
-    restart [app]            Rolling restart all dynos
+    restart [app]            Rolling restart all instances
 
     deploy [path]            Deploy application
     logs [app]               View application logs
@@ -1942,7 +1942,7 @@ EXAMPLES:
     paas init                Initialize app with current directory name
     paas apps create myapp   Create a new app called "myapp"
     paas addons add postgres Add PostgreSQL database
-    paas scale web=3         Scale to 3 web dynos
+    paas scale web=3         Scale to 3 web instances
     paas ps                  Show running processes
     git push paas main       Deploy via git push
 

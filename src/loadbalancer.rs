@@ -1,7 +1,7 @@
-//! Load balancer for distributing requests across multiple dynos
+//! Load balancer for distributing requests across multiple instances
 //!
 //! This module provides load balancing capabilities for the PaaS platform,
-//! distributing incoming requests across multiple dyno instances.
+//! distributing incoming requests across multiple instance instances.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,7 +24,7 @@ pub enum LoadBalanceStrategy {
 /// Backend instance for load balancing
 #[derive(Debug, Clone)]
 pub struct Backend {
-    /// Unique ID (dyno ID)
+    /// Unique ID (instance ID)
     pub id: String,
     /// Port to connect to
     pub port: u16,
@@ -53,7 +53,7 @@ impl Backend {
 pub struct AppLoadBalancer {
     /// Application name
     app_name: String,
-    /// Available backends (dyno instances)
+    /// Available backends (instance instances)
     backends: RwLock<Vec<Backend>>,
     /// Current index for round-robin
     round_robin_index: AtomicUsize,
@@ -78,7 +78,7 @@ impl AppLoadBalancer {
             backends.push(Backend::new(id.clone(), port));
             info!(
                 app = self.app_name,
-                dyno_id = id,
+                instance_id = id,
                 port,
                 total_backends = backends.len(),
                 "Added backend to load balancer"
@@ -93,7 +93,7 @@ impl AppLoadBalancer {
             backends.remove(pos);
             info!(
                 app = self.app_name,
-                dyno_id = id,
+                instance_id = id,
                 total_backends = backends.len(),
                 "Removed backend from load balancer"
             );
@@ -138,7 +138,7 @@ impl AppLoadBalancer {
         selected.map(|b| {
             debug!(
                 app = self.app_name,
-                dyno_id = b.id,
+                instance_id = b.id,
                 port = b.port,
                 strategy = ?self.strategy,
                 "Selected backend"
@@ -240,15 +240,15 @@ impl LoadBalancerManager {
     }
 
     /// Add a backend to an app's load balancer
-    pub async fn add_backend(&self, app_name: &str, dyno_id: &str, port: u16) {
+    pub async fn add_backend(&self, app_name: &str, instance_id: &str, port: u16) {
         let lb = self.get_or_create(app_name).await;
-        lb.add_backend(dyno_id.to_string(), port).await;
+        lb.add_backend(instance_id.to_string(), port).await;
     }
 
     /// Remove a backend from an app's load balancer
-    pub async fn remove_backend(&self, app_name: &str, dyno_id: &str) {
+    pub async fn remove_backend(&self, app_name: &str, instance_id: &str) {
         if let Some(lb) = self.get(app_name).await {
-            lb.remove_backend(dyno_id).await;
+            lb.remove_backend(instance_id).await;
         }
     }
 
@@ -272,9 +272,9 @@ mod tests {
     #[tokio::test]
     async fn test_round_robin() {
         let lb = AppLoadBalancer::new("test".to_string(), LoadBalanceStrategy::RoundRobin);
-        lb.add_backend("dyno-1".to_string(), 10001).await;
-        lb.add_backend("dyno-2".to_string(), 10002).await;
-        lb.add_backend("dyno-3".to_string(), 10003).await;
+        lb.add_backend("instance-1".to_string(), 10001).await;
+        lb.add_backend("instance-2".to_string(), 10002).await;
+        lb.add_backend("instance-3".to_string(), 10003).await;
 
         // Should cycle through backends
         assert_eq!(lb.get_next_port().await, Some(10001));
@@ -286,11 +286,11 @@ mod tests {
     #[tokio::test]
     async fn test_unhealthy_backend_skipped() {
         let lb = AppLoadBalancer::new("test".to_string(), LoadBalanceStrategy::RoundRobin);
-        lb.add_backend("dyno-1".to_string(), 10001).await;
-        lb.add_backend("dyno-2".to_string(), 10002).await;
+        lb.add_backend("instance-1".to_string(), 10001).await;
+        lb.add_backend("instance-2".to_string(), 10002).await;
 
         // Mark one as unhealthy
-        lb.set_backend_health("dyno-1", false).await;
+        lb.set_backend_health("instance-1", false).await;
 
         // Should only return healthy backend
         assert_eq!(lb.get_next_port().await, Some(10002));
@@ -300,8 +300,8 @@ mod tests {
     #[tokio::test]
     async fn test_no_healthy_backends() {
         let lb = AppLoadBalancer::new("test".to_string(), LoadBalanceStrategy::RoundRobin);
-        lb.add_backend("dyno-1".to_string(), 10001).await;
-        lb.set_backend_health("dyno-1", false).await;
+        lb.add_backend("instance-1".to_string(), 10001).await;
+        lb.set_backend_health("instance-1", false).await;
 
         assert_eq!(lb.get_next_port().await, None);
     }
@@ -309,12 +309,12 @@ mod tests {
     #[tokio::test]
     async fn test_remove_backend() {
         let lb = AppLoadBalancer::new("test".to_string(), LoadBalanceStrategy::RoundRobin);
-        lb.add_backend("dyno-1".to_string(), 10001).await;
-        lb.add_backend("dyno-2".to_string(), 10002).await;
+        lb.add_backend("instance-1".to_string(), 10001).await;
+        lb.add_backend("instance-2".to_string(), 10002).await;
 
         assert_eq!(lb.total_count().await, 2);
 
-        lb.remove_backend("dyno-1").await;
+        lb.remove_backend("instance-1").await;
         assert_eq!(lb.total_count().await, 1);
         assert_eq!(lb.get_next_port().await, Some(10002));
     }
@@ -323,9 +323,9 @@ mod tests {
     async fn test_load_balancer_manager() {
         let manager = LoadBalancerManager::default();
 
-        manager.add_backend("app1", "dyno-1", 10001).await;
-        manager.add_backend("app1", "dyno-2", 10002).await;
-        manager.add_backend("app2", "dyno-3", 10003).await;
+        manager.add_backend("app1", "instance-1", 10001).await;
+        manager.add_backend("app1", "instance-2", 10002).await;
+        manager.add_backend("app2", "instance-3", 10003).await;
 
         assert_eq!(manager.list_apps().await.len(), 2);
 

@@ -24,7 +24,7 @@ pub mod dashboard;
 pub mod db;
 pub mod docker;
 pub mod domains;
-pub mod dyno;
+pub mod instance;
 pub mod error;
 pub mod git;
 pub mod healthcheck;

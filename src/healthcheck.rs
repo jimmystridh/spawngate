@@ -1,6 +1,6 @@
-//! Health check system for dyno instances
+//! Health check system for instance instances
 //!
-//! Periodically checks the health of running dynos and updates their status.
+//! Periodically checks the health of running instances and updates their status.
 
 use crate::db::Database;
 use crate::loadbalancer::LoadBalancerManager;
@@ -37,14 +37,14 @@ impl Default for HealthCheckConfig {
     }
 }
 
-/// Tracks consecutive health check results for a dyno
-struct DynoHealthState {
+/// Tracks consecutive health check results for an instance
+struct InstanceHealthState {
     consecutive_failures: u32,
     consecutive_successes: u32,
     is_healthy: bool,
 }
 
-impl Default for DynoHealthState {
+impl Default for InstanceHealthState {
     fn default() -> Self {
         Self {
             consecutive_failures: 0,
@@ -54,7 +54,7 @@ impl Default for DynoHealthState {
     }
 }
 
-/// Health checker that monitors dyno instances
+/// Health checker that monitors instances
 pub struct HealthChecker {
     db: Arc<Database>,
     load_balancer: Arc<LoadBalancerManager>,
@@ -84,13 +84,13 @@ impl HealthChecker {
             "Health checker started"
         );
 
-        let mut health_states: std::collections::HashMap<String, DynoHealthState> =
+        let mut health_states: std::collections::HashMap<String, InstanceHealthState> =
             std::collections::HashMap::new();
 
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(self.config.interval) => {
-                    self.check_all_dynos(&mut health_states).await;
+                    self.check_all_instances(&mut health_states).await;
                 }
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
@@ -102,10 +102,10 @@ impl HealthChecker {
         }
     }
 
-    /// Check health of all running dynos
-    async fn check_all_dynos(
+    /// Check health of all running instances
+    async fn check_all_instances(
         &self,
-        health_states: &mut std::collections::HashMap<String, DynoHealthState>,
+        health_states: &mut std::collections::HashMap<String, InstanceHealthState>,
     ) {
         // Get all apps with load balancers
         let apps = self.load_balancer.list_apps().await;
@@ -114,9 +114,9 @@ impl HealthChecker {
             if let Some(lb) = self.load_balancer.get(&app_name).await {
                 let backends = lb.get_all_ports().await;
 
-                for (dyno_id, port) in backends {
-                    let is_healthy = self.check_dyno_health(port).await;
-                    let state = health_states.entry(dyno_id.clone()).or_default();
+                for (instance_id, port) in backends {
+                    let is_healthy = self.check_instance_health(port).await;
+                    let state = health_states.entry(instance_id.clone()).or_default();
 
                     if is_healthy {
                         state.consecutive_successes += 1;
@@ -129,12 +129,12 @@ impl HealthChecker {
                             state.is_healthy = true;
                             info!(
                                 app = app_name,
-                                dyno_id,
+                                instance_id,
                                 port,
-                                "Dyno is now healthy"
+                                "Instance is now healthy"
                             );
-                            lb.set_backend_health(&dyno_id, true).await;
-                            if let Err(e) = self.db.update_process_health(&dyno_id, "healthy") {
+                            lb.set_backend_health(&instance_id, true).await;
+                            if let Err(e) = self.db.update_process_health(&instance_id, "healthy") {
                                 error!(error = %e, "Failed to update process health in database");
                             }
                         }
@@ -149,13 +149,13 @@ impl HealthChecker {
                             state.is_healthy = false;
                             warn!(
                                 app = app_name,
-                                dyno_id,
+                                instance_id,
                                 port,
                                 failures = state.consecutive_failures,
-                                "Dyno is now unhealthy"
+                                "Instance is now unhealthy"
                             );
-                            lb.set_backend_health(&dyno_id, false).await;
-                            if let Err(e) = self.db.update_process_health(&dyno_id, "unhealthy") {
+                            lb.set_backend_health(&instance_id, false).await;
+                            if let Err(e) = self.db.update_process_health(&instance_id, "unhealthy") {
                                 error!(error = %e, "Failed to update process health in database");
                             }
                         }
@@ -164,24 +164,24 @@ impl HealthChecker {
             }
         }
 
-        // Clean up health states for dynos that no longer exist
-        let all_dyno_ids: std::collections::HashSet<String> = {
+        // Clean up health states for instances that no longer exist
+        let all_instance_ids: std::collections::HashSet<String> = {
             let mut ids = std::collections::HashSet::new();
             for app_name in self.load_balancer.list_apps().await {
                 if let Some(lb) = self.load_balancer.get(&app_name).await {
-                    for (dyno_id, _) in lb.get_all_ports().await {
-                        ids.insert(dyno_id);
+                    for (instance_id, _) in lb.get_all_ports().await {
+                        ids.insert(instance_id);
                     }
                 }
             }
             ids
         };
 
-        health_states.retain(|dyno_id, _| all_dyno_ids.contains(dyno_id));
+        health_states.retain(|instance_id, _| all_instance_ids.contains(instance_id));
     }
 
-    /// Check if a dyno is healthy by testing TCP connection
-    async fn check_dyno_health(&self, port: u16) -> bool {
+    /// Check if a instance is healthy by testing TCP connection
+    async fn check_instance_health(&self, port: u16) -> bool {
         let addr = format!("127.0.0.1:{}", port);
 
         // Try to establish a TCP connection
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_health_state_transitions() {
-        let mut state = DynoHealthState::default();
+        let mut state = InstanceHealthState::default();
         assert!(state.is_healthy);
 
         // Simulate failures

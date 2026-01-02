@@ -10,7 +10,7 @@ use crate::dashboard;
 use crate::db::{AddonRecord, AppRecord, Database, DeploymentRecord, WebhookRecord, WebhookEventRecord};
 use crate::domains::{DnsVerifier, DomainManager, SslManager};
 use crate::docker::DockerManager;
-use crate::dyno::{DynoConfig, DynoManager};
+use crate::instance::{InstanceConfig, InstanceManager};
 use crate::git::{GitServer, GitServerConfig};
 use crate::healthcheck::{HealthCheckConfig, HealthChecker};
 use crate::loadbalancer::LoadBalancerManager;
@@ -200,7 +200,7 @@ pub struct PlatformApi {
     addon_manager: Arc<AddonManager>,
     builder: Arc<Builder>,
     git_server: Arc<GitServer>,
-    dyno_manager: Arc<DynoManager>,
+    instance_manager: Arc<InstanceManager>,
     load_balancer: Arc<LoadBalancerManager>,
     secrets_manager: Arc<tokio::sync::RwLock<SecretsManager>>,
     webhook_handler: Arc<tokio::sync::RwLock<WebhookHandler>>,
@@ -245,20 +245,20 @@ impl PlatformApi {
         // Scan for existing repos
         git_server.scan_repos().await?;
 
-        // Initialize Docker, load balancer, and dyno manager
+        // Initialize Docker, load balancer, and instance manager
         let docker = DockerManager::new(None).await?;
         let db_arc = Arc::new(db);
         let load_balancer = Arc::new(LoadBalancerManager::default());
-        let dyno_config = DynoConfig {
+        let instance_config = InstanceConfig {
             network: config.network_name.clone(),
             health_check_url: Some(format!("http://{}", config.bind_addr)),
             memory_limit: Some("512m".to_string()),
             cpu_limit: Some("0.5".to_string()),
         };
-        let dyno_manager = DynoManager::new(
+        let instance_manager = InstanceManager::new(
             Arc::new(docker),
             Arc::clone(&db_arc),
-            dyno_config,
+            instance_config,
             Arc::clone(&load_balancer),
         ).await?;
 
@@ -323,7 +323,7 @@ impl PlatformApi {
             addon_manager: Arc::new(addon_manager),
             builder: Arc::new(builder),
             git_server: Arc::new(git_server),
-            dyno_manager: Arc::new(dyno_manager),
+            instance_manager: Arc::new(instance_manager),
             load_balancer,
             secrets_manager: Arc::new(tokio::sync::RwLock::new(secrets_manager)),
             webhook_handler: Arc::new(tokio::sync::RwLock::new(webhook_handler)),
@@ -1261,8 +1261,8 @@ impl PlatformApi {
             ));
         }
 
-        // Use DynoManager to actually spawn/stop containers
-        if let Err(e) = self.dyno_manager.scale(app_name, "web", scale_req.scale).await {
+        // Use InstanceManager to actually spawn/stop containers
+        if let Err(e) = self.instance_manager.scale(app_name, "web", scale_req.scale).await {
             error!(app = %app_name, error = %e, "Failed to scale app");
             return Ok(json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1299,8 +1299,8 @@ impl PlatformApi {
 
         info!(app = %app_name, "Triggering rolling restart");
 
-        // Use DynoManager for rolling restart
-        match self.dyno_manager.rolling_restart(app_name, None).await {
+        // Use InstanceManager for rolling restart
+        match self.instance_manager.rolling_restart(app_name, None).await {
             Ok(result) => {
                 let response = ApiResponse::ok(result);
                 Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
@@ -1883,7 +1883,7 @@ impl PlatformApi {
             self.db.create_deployment(&deployment)?;
 
             // Restart the app if it's running
-            let _ = self.dyno_manager.rolling_restart(app_name, Some(&result.image)).await;
+            let _ = self.instance_manager.rolling_restart(app_name, Some(&result.image)).await;
         } else {
             anyhow::bail!("Build failed: {}", result.error.unwrap_or_default());
         }

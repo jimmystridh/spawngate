@@ -93,9 +93,9 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Log download (export filtered logs as text file)
 
 ### Phase 4: Scaling & Processes
-- [ ] Visual dyno manager (slider/input)
+- [ ] Visual instance manager (slider/input)
 - [ ] Process type cards (web, worker, etc.)
-- [ ] Restart/stop individual dynos
+- [ ] Restart/stop individual instances
 - [ ] Resource usage graphs (CPU, memory)
 - [ ] Formation editor
 
@@ -129,7 +129,7 @@ Full-featured web UI for managing the PaaS platform.
 - [ ] Request rate graphs
 - [ ] Response time percentiles
 - [ ] Error rate visualization
-- [ ] Memory/CPU charts (per dyno)
+- [ ] Memory/CPU charts (per instance)
 - [ ] Alerting rules (future)
 
 ### Phase 10: Activity & Notifications

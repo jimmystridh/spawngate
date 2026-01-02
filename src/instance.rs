@@ -1,6 +1,6 @@
-//! Dyno (process) manager for horizontal scaling
+//! Instance manager for horizontal scaling
 //!
-//! Manages multiple container instances per app, similar to Heroku dynos.
+//! Manages multiple container instances per app for horizontal scaling.
 
 use crate::db::{Database, ProcessRecord};
 use crate::docker::DockerManager;
@@ -19,20 +19,20 @@ use uuid::Uuid;
 const PORT_RANGE_START: u16 = 10000;
 const PORT_RANGE_END: u16 = 20000;
 
-/// Dyno manager configuration
+/// Instance manager configuration
 #[derive(Debug, Clone)]
-pub struct DynoConfig {
+pub struct InstanceConfig {
     /// Docker network to connect containers to
     pub network: String,
     /// Base URL for health check callbacks
     pub health_check_url: Option<String>,
-    /// Default memory limit per dyno
+    /// Default memory limit per instance
     pub memory_limit: Option<String>,
-    /// Default CPU limit per dyno
+    /// Default CPU limit per instance
     pub cpu_limit: Option<String>,
 }
 
-impl Default for DynoConfig {
+impl Default for InstanceConfig {
     fn default() -> Self {
         Self {
             network: "spawngate".to_string(),
@@ -43,16 +43,16 @@ impl Default for DynoConfig {
     }
 }
 
-/// Running dyno instance
+/// Running instance
 #[derive(Debug, Clone)]
-pub struct Dyno {
+pub struct Instance {
     pub id: String,
     pub app_name: String,
     pub process_type: String,
     pub container_id: String,
     pub container_name: String,
     pub port: u16,
-    pub status: DynoStatus,
+    pub status: InstanceStatus,
     pub started_at: String,
 }
 
@@ -60,20 +60,20 @@ pub struct Dyno {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RollingDeployResult {
     pub app_name: String,
-    pub total_dynos: usize,
+    pub total_instances: usize,
     pub successful: usize,
     pub failed: usize,
 }
 
 impl RollingDeployResult {
     pub fn is_success(&self) -> bool {
-        self.failed == 0 && self.total_dynos > 0
+        self.failed == 0 && self.total_instances > 0
     }
 }
 
-/// Dyno status
+/// Instance status
 #[derive(Debug, Clone, PartialEq)]
-pub enum DynoStatus {
+pub enum InstanceStatus {
     Starting,
     Running,
     Unhealthy,
@@ -82,24 +82,24 @@ pub enum DynoStatus {
     Crashed,
 }
 
-impl std::fmt::Display for DynoStatus {
+impl std::fmt::Display for InstanceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DynoStatus::Starting => write!(f, "starting"),
-            DynoStatus::Running => write!(f, "running"),
-            DynoStatus::Unhealthy => write!(f, "unhealthy"),
-            DynoStatus::Stopping => write!(f, "stopping"),
-            DynoStatus::Stopped => write!(f, "stopped"),
-            DynoStatus::Crashed => write!(f, "crashed"),
+            InstanceStatus::Starting => write!(f, "starting"),
+            InstanceStatus::Running => write!(f, "running"),
+            InstanceStatus::Unhealthy => write!(f, "unhealthy"),
+            InstanceStatus::Stopping => write!(f, "stopping"),
+            InstanceStatus::Stopped => write!(f, "stopped"),
+            InstanceStatus::Crashed => write!(f, "crashed"),
         }
     }
 }
 
-/// Manages dynos (processes) for applications
-pub struct DynoManager {
+/// Manages instances (processes) for applications
+pub struct InstanceManager {
     docker: Arc<DockerManager>,
     db: Arc<Database>,
-    config: DynoConfig,
+    config: InstanceConfig,
     /// Currently assigned ports
     assigned_ports: RwLock<HashMap<String, u16>>,
     /// Next port to try assigning
@@ -108,12 +108,12 @@ pub struct DynoManager {
     load_balancer: Arc<LoadBalancerManager>,
 }
 
-impl DynoManager {
-    /// Create a new dyno manager
+impl InstanceManager {
+    /// Create a new instance manager
     pub async fn new(
         docker: Arc<DockerManager>,
         db: Arc<Database>,
-        config: DynoConfig,
+        config: InstanceConfig,
         load_balancer: Arc<LoadBalancerManager>,
     ) -> Result<Self> {
         Ok(Self {
@@ -131,7 +131,7 @@ impl DynoManager {
         &self.load_balancer
     }
 
-    /// Scale an app to the specified number of dynos
+    /// Scale an app to the specified number of instances
     pub async fn scale(&self, app_name: &str, process_type: &str, target_count: i32) -> Result<()> {
         let app = self.db.get_app(app_name)?
             .ok_or_else(|| anyhow::anyhow!("App not found: {}", app_name))?;
@@ -155,21 +155,21 @@ impl DynoManager {
         );
 
         if target_count > current_count {
-            // Scale up - spawn new dynos
+            // Scale up - spawn new instances
             let to_spawn = target_count - current_count;
             for i in 0..to_spawn {
                 info!(
                     app = app_name,
                     process_type,
-                    dyno = current_count + i + 1,
-                    "Spawning new dyno"
+                    instance = current_count + i + 1,
+                    "Spawning new instance"
                 );
-                if let Err(e) = self.spawn_dyno(app_name, &image, process_type, app.port as u16).await {
-                    error!(app = app_name, error = %e, "Failed to spawn dyno");
+                if let Err(e) = self.spawn_instance(app_name, &image, process_type, app.port as u16).await {
+                    error!(app = app_name, error = %e, "Failed to spawn instance");
                 }
             }
         } else if target_count < current_count {
-            // Scale down - stop dynos (newest first)
+            // Scale down - stop instances (newest first)
             let to_stop = current_count - target_count;
             let mut running: Vec<_> = current_processes
                 .iter()
@@ -183,11 +183,11 @@ impl DynoManager {
                 info!(
                     app = app_name,
                     process_type,
-                    dyno_id = proc.id,
-                    "Stopping dyno"
+                    instance_id = proc.id,
+                    "Stopping instance"
                 );
-                if let Err(e) = self.stop_dyno(&proc.id).await {
-                    error!(dyno_id = proc.id, error = %e, "Failed to stop dyno");
+                if let Err(e) = self.stop_instance(&proc.id).await {
+                    error!(instance_id = proc.id, error = %e, "Failed to stop instance");
                 }
             }
         }
@@ -198,19 +198,19 @@ impl DynoManager {
         Ok(())
     }
 
-    /// Spawn a single dyno
-    pub async fn spawn_dyno(
+    /// Spawn a single instance
+    pub async fn spawn_instance(
         &self,
         app_name: &str,
         image: &str,
         process_type: &str,
         app_port: u16,
-    ) -> Result<Dyno> {
-        let dyno_id = Uuid::new_v4().to_string();
-        let container_name = format!("paas-{}-{}-{}", app_name, process_type, &dyno_id[..8]);
+    ) -> Result<Instance> {
+        let instance_id = Uuid::new_v4().to_string();
+        let container_name = format!("paas-{}-{}-{}", app_name, process_type, &instance_id[..8]);
 
         // Allocate a port
-        let host_port = self.allocate_port(&dyno_id).await?;
+        let host_port = self.allocate_port(&instance_id).await?;
 
         // Get app config (env vars)
         let config_vars = self.db.get_all_config(app_name)?;
@@ -221,10 +221,10 @@ impl DynoManager {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
         env.push(format!("PORT={}", app_port));
-        env.push(format!("DYNO={}.{}", process_type, &dyno_id[..8]));
-        env.push(format!("DYNO_ID={}", dyno_id));
+        env.push(format!("INSTANCE={}.{}", process_type, &instance_id[..8]));
+        env.push(format!("INSTANCE_ID={}", instance_id));
         if let Some(ref health_url) = self.config.health_check_url {
-            env.push(format!("HEALTH_CHECK_URL={}/health/{}", health_url, dyno_id));
+            env.push(format!("HEALTH_CHECK_URL={}/health/{}", health_url, instance_id));
         }
 
         // Build port bindings - map host_port to container's app_port
@@ -268,7 +268,7 @@ impl DynoManager {
             labels: Some(HashMap::from([
                 ("paas.app".to_string(), app_name.to_string()),
                 ("paas.process_type".to_string(), process_type.to_string()),
-                ("paas.dyno_id".to_string(), dyno_id.clone()),
+                ("paas.instance_id".to_string(), instance_id.clone()),
             ])),
             ..Default::default()
         };
@@ -288,11 +288,11 @@ impl DynoManager {
 
         debug!(
             app = app_name,
-            dyno_id,
+            instance_id,
             container_id,
             container_name,
             host_port,
-            "Created dyno container"
+            "Created instance container"
         );
 
         // Start container
@@ -303,15 +303,15 @@ impl DynoManager {
 
         info!(
             app = app_name,
-            dyno_id,
+            instance_id,
             container_id,
             host_port,
-            "Started dyno"
+            "Started instance"
         );
 
         // Record in database (started_at is set by database default)
         let process_record = ProcessRecord {
-            id: dyno_id.clone(),
+            id: instance_id.clone(),
             app_name: app_name.to_string(),
             process_type: process_type.to_string(),
             container_id: Some(container_id.clone()),
@@ -325,32 +325,32 @@ impl DynoManager {
         self.db.create_process(&process_record)?;
 
         // Register with load balancer
-        self.load_balancer.add_backend(app_name, &dyno_id, host_port).await;
+        self.load_balancer.add_backend(app_name, &instance_id, host_port).await;
 
-        Ok(Dyno {
-            id: dyno_id,
+        Ok(Instance {
+            id: instance_id,
             app_name: app_name.to_string(),
             process_type: process_type.to_string(),
             container_id,
             container_name,
             port: host_port,
-            status: DynoStatus::Running,
+            status: InstanceStatus::Running,
             started_at: process_record.started_at,
         })
     }
 
-    /// Stop a dyno
-    pub async fn stop_dyno(&self, dyno_id: &str) -> Result<()> {
+    /// Stop an instance
+    pub async fn stop_instance(&self, instance_id: &str) -> Result<()> {
         // Get process record
         let processes = self.db.get_app_processes("")?;
         let proc = processes.iter()
-            .find(|p| p.id == dyno_id)
-            .ok_or_else(|| anyhow::anyhow!("Dyno not found: {}", dyno_id))?;
+            .find(|p| p.id == instance_id)
+            .ok_or_else(|| anyhow::anyhow!("Instance not found: {}", instance_id))?;
 
         let app_name = proc.app_name.clone();
 
-        // Unregister from load balancer first (so new requests don't go to this dyno)
-        self.load_balancer.remove_backend(&app_name, dyno_id).await;
+        // Unregister from load balancer first (so new requests don't go to this instance)
+        self.load_balancer.remove_backend(&app_name, instance_id).await;
 
         if let Some(ref container_id) = proc.container_id {
             // Stop the container
@@ -361,24 +361,24 @@ impl DynoManager {
         }
 
         // Release port
-        self.release_port(dyno_id).await;
+        self.release_port(instance_id).await;
 
         // Update database
-        self.db.update_process_status(dyno_id, "stopped")?;
+        self.db.update_process_status(instance_id, "stopped")?;
 
-        info!(dyno_id, "Stopped dyno");
+        info!(instance_id, "Stopped instance");
 
         Ok(())
     }
 
-    /// Stop all dynos for an app
+    /// Stop all instances for an app
     pub async fn stop_all(&self, app_name: &str) -> Result<()> {
         let processes = self.db.get_app_processes(app_name)?;
 
         for proc in processes {
             if proc.status != "stopped" && proc.status != "crashed" {
-                if let Err(e) = self.stop_dyno(&proc.id).await {
-                    warn!(dyno_id = proc.id, error = %e, "Failed to stop dyno");
+                if let Err(e) = self.stop_instance(&proc.id).await {
+                    warn!(instance_id = proc.id, error = %e, "Failed to stop instance");
                 }
             }
         }
@@ -386,7 +386,7 @@ impl DynoManager {
         Ok(())
     }
 
-    /// Restart all dynos for an app (for rolling deploys)
+    /// Restart all instances for an app (for rolling deploys)
     pub async fn restart_all(&self, app_name: &str) -> Result<()> {
         self.rolling_restart(app_name, None).await?;
         Ok(())
@@ -395,8 +395,8 @@ impl DynoManager {
     /// Perform a rolling restart with optional new image
     ///
     /// This implements a zero-downtime rolling deploy:
-    /// 1. For each old dyno: spawn a new one, wait for it to be ready, then stop the old one
-    /// 2. Maintains at least one running dyno at all times
+    /// 1. For each old instance: spawn a new one, wait for it to be ready, then stop the old one
+    /// 2. Maintains at least one running instance at all times
     pub async fn rolling_restart(&self, app_name: &str, new_image: Option<&str>) -> Result<RollingDeployResult> {
         let app = self.db.get_app(app_name)?
             .ok_or_else(|| anyhow::anyhow!("App not found: {}", app_name))?;
@@ -415,10 +415,10 @@ impl DynoManager {
         let total = running.len();
 
         if total == 0 {
-            info!(app = app_name, "No running dynos to restart");
+            info!(app = app_name, "No running instances to restart");
             return Ok(RollingDeployResult {
                 app_name: app_name.to_string(),
-                total_dynos: 0,
+                total_instances: 0,
                 successful: 0,
                 failed: 0,
             });
@@ -437,55 +437,55 @@ impl DynoManager {
         for (idx, proc) in running.iter().enumerate() {
             info!(
                 app = app_name,
-                dyno = idx + 1,
+                instance = idx + 1,
                 total,
-                "Rolling deploy: replacing dyno"
+                "Rolling deploy: replacing instance"
             );
 
-            // Spawn new dyno with potentially new image
-            match self.spawn_dyno(app_name, &image, &proc.process_type, app.port as u16).await {
-                Ok(new_dyno) => {
+            // Spawn new instance with potentially new image
+            match self.spawn_instance(app_name, &image, &proc.process_type, app.port as u16).await {
+                Ok(new_instance) => {
                     debug!(
                         app = app_name,
-                        old_dyno = proc.id,
-                        new_dyno = new_dyno.id,
-                        "New dyno spawned, waiting for ready..."
+                        old_instance = proc.id,
+                        new_instance = new_instance.id,
+                        "New instance spawned, waiting for ready..."
                     );
 
-                    // Wait for new dyno to be ready (check if port is accepting connections)
-                    let ready = self.wait_for_dyno_ready(new_dyno.port, 30).await;
+                    // Wait for new instance to be ready (check if port is accepting connections)
+                    let ready = self.wait_for_instance_ready(new_instance.port, 30).await;
 
                     if ready {
                         info!(
                             app = app_name,
-                            new_dyno = new_dyno.id,
-                            port = new_dyno.port,
-                            "New dyno is ready"
+                            new_instance = new_instance.id,
+                            port = new_instance.port,
+                            "New instance is ready"
                         );
 
-                        // Stop old dyno
-                        if let Err(e) = self.stop_dyno(&proc.id).await {
-                            warn!(dyno_id = proc.id, error = %e, "Failed to stop old dyno");
+                        // Stop old instance
+                        if let Err(e) = self.stop_instance(&proc.id).await {
+                            warn!(instance_id = proc.id, error = %e, "Failed to stop old instance");
                         }
 
                         successful += 1;
                     } else {
                         warn!(
                             app = app_name,
-                            new_dyno = new_dyno.id,
-                            "New dyno failed to become ready, keeping old dyno"
+                            new_instance = new_instance.id,
+                            "New instance failed to become ready, keeping old instance"
                         );
-                        // Stop the unhealthy new dyno
-                        let _ = self.stop_dyno(&new_dyno.id).await;
+                        // Stop the unhealthy new instance
+                        let _ = self.stop_instance(&new_instance.id).await;
                         failed += 1;
                     }
                 }
                 Err(e) => {
                     error!(
                         app = app_name,
-                        dyno = idx + 1,
+                        instance = idx + 1,
                         error = %e,
-                        "Failed to spawn replacement dyno"
+                        "Failed to spawn replacement instance"
                     );
                     failed += 1;
                 }
@@ -501,14 +501,14 @@ impl DynoManager {
 
         Ok(RollingDeployResult {
             app_name: app_name.to_string(),
-            total_dynos: total,
+            total_instances: total,
             successful,
             failed,
         })
     }
 
-    /// Wait for a dyno to become ready (accepts TCP connections)
-    async fn wait_for_dyno_ready(&self, port: u16, timeout_secs: u64) -> bool {
+    /// Wait for an instance to become ready (accepts TCP connections)
+    async fn wait_for_instance_ready(&self, port: u16, timeout_secs: u64) -> bool {
         let addr = format!("127.0.0.1:{}", port);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -522,13 +522,13 @@ impl DynoManager {
         false
     }
 
-    /// Get all running dynos for an app
-    pub async fn list_dynos(&self, app_name: &str) -> Result<Vec<ProcessRecord>> {
+    /// Get all running instances for an app
+    pub async fn list_instances(&self, app_name: &str) -> Result<Vec<ProcessRecord>> {
         Ok(self.db.get_app_processes(app_name)?)
     }
 
-    /// Get dyno ports for load balancing
-    pub async fn get_dyno_ports(&self, app_name: &str) -> Vec<u16> {
+    /// Get instance ports for load balancing
+    pub async fn get_instance_ports(&self, app_name: &str) -> Vec<u16> {
         match self.db.get_app_processes(app_name) {
             Ok(processes) => processes
                 .iter()
@@ -539,8 +539,8 @@ impl DynoManager {
         }
     }
 
-    /// Allocate a port for a new dyno
-    async fn allocate_port(&self, dyno_id: &str) -> Result<u16> {
+    /// Allocate a port for a new instance
+    async fn allocate_port(&self, instance_id: &str) -> Result<u16> {
         let mut assigned = self.assigned_ports.write().await;
 
         // Find an available port
@@ -557,7 +557,7 @@ impl DynoManager {
             if !assigned.values().any(|&p| p == port) {
                 // Check if port is actually available (not used by other processes)
                 if is_port_available(port) {
-                    assigned.insert(dyno_id.to_string(), port);
+                    assigned.insert(instance_id.to_string(), port);
                     return Ok(port);
                 }
             }
@@ -569,10 +569,10 @@ impl DynoManager {
         }
     }
 
-    /// Release a port when a dyno stops
-    async fn release_port(&self, dyno_id: &str) {
+    /// Release a port when an instance stops
+    async fn release_port(&self, instance_id: &str) {
         let mut assigned = self.assigned_ports.write().await;
-        assigned.remove(dyno_id);
+        assigned.remove(instance_id);
     }
 }
 
@@ -608,10 +608,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dyno_status_display() {
-        assert_eq!(DynoStatus::Running.to_string(), "running");
-        assert_eq!(DynoStatus::Starting.to_string(), "starting");
-        assert_eq!(DynoStatus::Crashed.to_string(), "crashed");
+    fn test_instance_status_display() {
+        assert_eq!(InstanceStatus::Running.to_string(), "running");
+        assert_eq!(InstanceStatus::Starting.to_string(), "starting");
+        assert_eq!(InstanceStatus::Crashed.to_string(), "crashed");
     }
 
     #[test]

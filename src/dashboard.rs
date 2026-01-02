@@ -167,9 +167,9 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
 
 <div class="tab-content" x-show="activeTab === 'resources'">
     <div class="card">
-        <h2>Dynos</h2>
-        <div id="dynos-list" hx-get="/dashboard/apps/{0}/dynos" hx-trigger="load" hx-swap="innerHTML">
-            <div class="loading">Loading dynos...</div>
+        <h2>Instances</h2>
+        <div id="instances-list" hx-get="/dashboard/apps/{0}/dynos" hx-trigger="load" hx-swap="innerHTML">
+            <div class="loading">Loading instances...</div>
         </div>
     </div>
     <div class="card">
@@ -439,7 +439,7 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
                     <option value="app">App</option>
                     <option value="router">Router</option>
                     <option value="build">Build</option>
-                    <option value="dyno">Dyno</option>
+                    <option value="instance">Instance</option>
                 </select>
                 <select class="select select-sm" x-model="logLevel">
                     <option value="all">All Levels</option>
@@ -528,18 +528,18 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
                     <label>Current Scale</label>
                     <div class="scale-display">
                         <span class="scale-value" x-text="currentScale"></span>
-                        <span class="scale-label">dynos</span>
+                        <span class="scale-label">instances</span>
                     </div>
                 </div>
             </div>
             <div class="form-row two-col">
                 <div class="form-group">
-                    <label for="settings-min-scale">Minimum Dynos</label>
+                    <label for="settings-min-scale">Minimum Instances</label>
                     <input type="number" id="settings-min-scale" x-model.number="minScale" min="0" max="10" class="input">
                     <small>Scale to 0 to enable idle shutdown</small>
                 </div>
                 <div class="form-group">
-                    <label for="settings-max-scale">Maximum Dynos</label>
+                    <label for="settings-max-scale">Maximum Instances</label>
                     <input type="number" id="settings-max-scale" x-model.number="maxScale" min="1" max="100" class="input">
                     <small>Maximum instances for auto-scaling</small>
                 </div>
