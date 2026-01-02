@@ -2742,6 +2742,393 @@ fn get_event_type_class(event_type: &str) -> &'static str {
     }
 }
 
+// ==================== Alert Management UI ====================
+
+pub fn render_alerts_page(rules: &[serde_json::Value], events: &[serde_json::Value], firing_count: usize) -> String {
+    let rules_html = render_alert_rules_list(rules);
+    let events_html = render_alert_events_list(events);
+
+    let firing_badge = if firing_count > 0 {
+        format!(r#"<span class="badge badge-danger">{} firing</span>"#, firing_count)
+    } else {
+        r#"<span class="badge badge-success">All clear</span>"#.to_string()
+    };
+
+    format!(
+        r##"<div class="alerts-page" x-data="{{ activeTab: 'rules', showCreateModal: false }}">
+    <div class="page-header">
+        <div class="header-left">
+            <h2>Alerts</h2>
+            {firing_badge}
+        </div>
+        <div class="header-actions">
+            <button class="btn btn-primary" @click="showCreateModal = true">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                </svg>
+                Create Rule
+            </button>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <button class="tab" :class="{{ 'active': activeTab === 'rules' }}" @click="activeTab = 'rules'">
+            Rules
+        </button>
+        <button class="tab" :class="{{ 'active': activeTab === 'events' }}" @click="activeTab = 'events'">
+            Events
+        </button>
+    </div>
+
+    <div x-show="activeTab === 'rules'" class="tab-content">
+        {rules_html}
+    </div>
+
+    <div x-show="activeTab === 'events'" class="tab-content">
+        {events_html}
+    </div>
+
+    {create_modal}
+</div>
+{css}"##,
+        firing_badge = firing_badge,
+        rules_html = rules_html,
+        events_html = events_html,
+        create_modal = get_create_alert_modal(),
+        css = get_alerts_css()
+    )
+}
+
+pub fn render_alert_rules_list(rules: &[serde_json::Value]) -> String {
+    if rules.is_empty() {
+        return r##"<div class="empty-state">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="64" height="64">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+            </svg>
+            <h3>No alert rules</h3>
+            <p>Create your first alert rule to monitor your apps</p>
+        </div>"##.to_string();
+    }
+
+    let items: Vec<String> = rules.iter().map(|rule| {
+        let id = rule["id"].as_str().unwrap_or("");
+        let name = rule["name"].as_str().unwrap_or("Unnamed Rule");
+        let description = rule["description"].as_str().unwrap_or("");
+        let app_name = rule["app_name"].as_str();
+        let metric_type = rule["metric_type"].as_str().unwrap_or("");
+        let condition = rule["condition"].as_str().unwrap_or(">");
+        let threshold = rule["threshold"].as_f64().unwrap_or(0.0);
+        let severity = rule["severity"].as_str().unwrap_or("warning");
+        let enabled = rule["enabled"].as_bool().unwrap_or(true);
+
+        let app_badge = match app_name {
+            Some(app) => format!(r#"<span class="badge badge-app">{}</span>"#, app),
+            None => r#"<span class="badge badge-platform">Platform-wide</span>"#.to_string(),
+        };
+
+        let severity_class = match severity {
+            "critical" => "severity-critical",
+            "warning" => "severity-warning",
+            _ => "severity-info",
+        };
+
+        let status_class = if enabled { "status-enabled" } else { "status-disabled" };
+        let toggle_label = if enabled { "Enabled" } else { "Disabled" };
+
+        let metric_display = get_metric_display(metric_type);
+        let condition_text = format!("{} {}", condition, threshold);
+
+        format!(
+            r##"<div class="alert-rule-card {status_class}">
+    <div class="rule-header">
+        <div class="rule-info">
+            <h4>{name}</h4>
+            {app_badge}
+            <span class="badge {severity_class}">{severity}</span>
+        </div>
+        <div class="rule-actions">
+            <label class="toggle-switch">
+                <input type="checkbox" {checked} hx-post="/dashboard/alerts/rules/{id}/toggle" hx-vals='{{\"enabled\": {toggle_val}}}' hx-swap="none">
+                <span class="toggle-slider"></span>
+            </label>
+            <button class="btn btn-icon btn-sm btn-danger" hx-delete="/dashboard/alerts/rules/{id}" hx-confirm="Delete this alert rule?" hx-swap="none">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+    <div class="rule-condition">
+        <span class="metric-name">{metric_display}</span>
+        <span class="condition-text">{condition_text}</span>
+    </div>
+    <p class="rule-description">{description}</p>
+</div>"##,
+            status_class = status_class,
+            name = name,
+            app_badge = app_badge,
+            severity_class = severity_class,
+            severity = severity,
+            checked = if enabled { "checked" } else { "" },
+            id = id,
+            toggle_val = !enabled,
+            metric_display = metric_display,
+            condition_text = condition_text,
+            description = if description.is_empty() { "No description" } else { description }
+        )
+    }).collect();
+
+    format!(r#"<div class="alert-rules-list">{}</div>"#, items.join(""))
+}
+
+pub fn render_alert_events_list(events: &[serde_json::Value]) -> String {
+    if events.is_empty() {
+        return r##"<div class="empty-state">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="64" height="64">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <h3>No alert events</h3>
+            <p>Alert events will appear here when rules are triggered</p>
+        </div>"##.to_string();
+    }
+
+    let items: Vec<String> = events.iter().map(|event| {
+        let id = event["id"].as_i64().unwrap_or(0);
+        let rule_id = event["rule_id"].as_str().unwrap_or("");
+        let app_name = event["app_name"].as_str();
+        let status = event["status"].as_str().unwrap_or("firing");
+        let metric_value = event["metric_value"].as_f64().unwrap_or(0.0);
+        let threshold = event["threshold"].as_f64().unwrap_or(0.0);
+        let message = event["message"].as_str().unwrap_or("");
+        let started_at = event["started_at"].as_str().unwrap_or("");
+        let resolved_at = event["resolved_at"].as_str();
+        let acknowledged_at = event["acknowledged_at"].as_str();
+        let acknowledged_by = event["acknowledged_by"].as_str();
+
+        let status_class = match status {
+            "firing" => "status-firing",
+            "resolved" => "status-resolved",
+            _ => "status-unknown",
+        };
+
+        let status_icon = match status {
+            "firing" => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>"#,
+            "resolved" => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"#,
+            _ => "",
+        };
+
+        let app_badge = match app_name {
+            Some(app) => format!(r#"<span class="badge badge-app">{}</span>"#, app),
+            None => String::new(),
+        };
+
+        let ack_info = if let Some(by) = acknowledged_by {
+            format!(r#"<span class="ack-badge">Acknowledged by {}</span>"#, by)
+        } else if status == "firing" {
+            format!(r#"<button class="btn btn-sm btn-outline" hx-post="/dashboard/alerts/events/{}/acknowledge" hx-swap="none">Acknowledge</button>"#, id)
+        } else {
+            String::new()
+        };
+
+        let duration_info = if let Some(resolved) = resolved_at {
+            format!("Resolved: {}", format_relative_time(resolved))
+        } else {
+            format!("Started: {}", format_relative_time(started_at))
+        };
+
+        format!(
+            r##"<div class="alert-event-card {status_class}">
+    <div class="event-icon">{status_icon}</div>
+    <div class="event-content">
+        <div class="event-header">
+            <span class="event-status">{status}</span>
+            {app_badge}
+        </div>
+        <p class="event-message">{message}</p>
+        <div class="event-details">
+            <span>Value: {metric_value:.2} (threshold: {threshold:.2})</span>
+        </div>
+        <div class="event-meta">
+            <span class="event-time">{duration_info}</span>
+            {ack_info}
+        </div>
+    </div>
+</div>"##,
+            status_class = status_class,
+            status_icon = status_icon,
+            status = status,
+            app_badge = app_badge,
+            message = message,
+            metric_value = metric_value,
+            threshold = threshold,
+            duration_info = duration_info,
+            ack_info = ack_info
+        )
+    }).collect();
+
+    format!(r#"<div class="alert-events-list">{}</div>"#, items.join(""))
+}
+
+fn get_metric_display(metric_type: &str) -> String {
+    match metric_type {
+        "error_rate" => "Error Rate (%)".to_string(),
+        "response_time" => "Response Time (ms)".to_string(),
+        "response_time_p95" => "Response Time P95 (ms)".to_string(),
+        "response_time_p99" => "Response Time P99 (ms)".to_string(),
+        "cpu_usage" => "CPU Usage (%)".to_string(),
+        "memory_usage" => "Memory Usage (%)".to_string(),
+        "request_rate" => "Request Rate (req/min)".to_string(),
+        _ => metric_type.to_string(),
+    }
+}
+
+fn get_create_alert_modal() -> &'static str {
+    r##"<div x-show="showCreateModal" class="modal-backdrop" @click.self="showCreateModal = false">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>Create Alert Rule</h3>
+            <button class="btn btn-icon" @click="showCreateModal = false">&times;</button>
+        </div>
+        <form hx-post="/dashboard/alerts/rules" hx-swap="none" @htmx:after-request="showCreateModal = false; htmx.trigger(document.body, 'reload')">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Name *</label>
+                    <input type="text" name="name" class="input" required placeholder="High Error Rate">
+                </div>
+                <div class="form-group">
+                    <label>Description</label>
+                    <input type="text" name="description" class="input" placeholder="Alert when error rate exceeds threshold">
+                </div>
+                <div class="form-group">
+                    <label>App (optional)</label>
+                    <input type="text" name="app_name" class="input" placeholder="Leave empty for platform-wide">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Metric *</label>
+                        <select name="metric_type" class="input" required>
+                            <option value="error_rate">Error Rate</option>
+                            <option value="response_time">Response Time</option>
+                            <option value="response_time_p95">Response Time P95</option>
+                            <option value="response_time_p99">Response Time P99</option>
+                            <option value="cpu_usage">CPU Usage</option>
+                            <option value="memory_usage">Memory Usage</option>
+                            <option value="request_rate">Request Rate</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Condition</label>
+                        <select name="condition" class="input">
+                            <option value=">">Greater than</option>
+                            <option value=">=">Greater or equal</option>
+                            <option value="<">Less than</option>
+                            <option value="<=">Less or equal</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Threshold *</label>
+                        <input type="number" name="threshold" class="input" required step="0.01" placeholder="5.0">
+                    </div>
+                    <div class="form-group">
+                        <label>Duration (seconds)</label>
+                        <input type="number" name="duration_secs" class="input" value="60" min="10">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Severity</label>
+                    <select name="severity" class="input">
+                        <option value="info">Info</option>
+                        <option value="warning" selected>Warning</option>
+                        <option value="critical">Critical</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline" @click="showCreateModal = false">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create Rule</button>
+            </div>
+        </form>
+    </div>
+</div>"##
+}
+
+fn get_alerts_css() -> &'static str {
+    r##"<style>
+.alerts-page { padding: 20px; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-left h2 { margin: 0; }
+.tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.tab { padding: 8px 16px; border: none; background: none; cursor: pointer; border-radius: 4px 4px 0 0; color: var(--text-muted); }
+.tab.active { background: var(--primary); color: white; }
+.tab:hover:not(.active) { background: var(--bg-hover); }
+
+.alert-rules-list, .alert-events-list { display: flex; flex-direction: column; gap: 12px; }
+
+.alert-rule-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.alert-rule-card.status-disabled { opacity: 0.6; }
+.rule-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.rule-info { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rule-info h4 { margin: 0; }
+.rule-actions { display: flex; gap: 8px; align-items: center; }
+.rule-condition { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.metric-name { font-weight: 500; color: var(--primary); }
+.condition-text { font-family: monospace; background: var(--bg-code); padding: 2px 6px; border-radius: 4px; }
+.rule-description { margin: 0; color: var(--text-muted); font-size: 0.9em; }
+
+.toggle-switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .3s; border-radius: 22px; }
+.toggle-slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
+input:checked + .toggle-slider { background-color: var(--primary); }
+input:checked + .toggle-slider:before { transform: translateX(18px); }
+
+.alert-event-card { display: flex; gap: 12px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.alert-event-card.status-firing { border-left: 4px solid #ef4444; }
+.alert-event-card.status-resolved { border-left: 4px solid #22c55e; }
+.event-icon { flex-shrink: 0; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
+.status-firing .event-icon { background: #fef2f2; color: #ef4444; }
+.status-resolved .event-icon { background: #f0fdf4; color: #22c55e; }
+.event-content { flex: 1; }
+.event-header { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.event-status { font-weight: 600; text-transform: capitalize; }
+.status-firing .event-status { color: #ef4444; }
+.status-resolved .event-status { color: #22c55e; }
+.event-message { margin: 0 0 8px 0; }
+.event-details { font-size: 0.85em; color: var(--text-muted); margin-bottom: 8px; }
+.event-meta { display: flex; justify-content: space-between; align-items: center; }
+.event-time { font-size: 0.85em; color: var(--text-muted); }
+.ack-badge { font-size: 0.85em; color: var(--text-muted); background: var(--bg-code); padding: 2px 8px; border-radius: 4px; }
+
+.severity-critical { background: #ef4444; color: white; }
+.severity-warning { background: #f59e0b; color: white; }
+.severity-info { background: #3b82f6; color: white; }
+
+.badge-app { background: var(--primary); color: white; }
+.badge-platform { background: #6b7280; color: white; }
+.badge-success { background: #22c55e; color: white; }
+.badge-danger { background: #ef4444; color: white; }
+
+.modal-backdrop { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: var(--card-bg); border-radius: 12px; width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.modal-header h3 { margin: 0; }
+.modal-body { padding: 20px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--border); }
+
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; margin-bottom: 4px; font-weight: 500; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+.empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+.empty-state svg { margin-bottom: 16px; opacity: 0.5; }
+.empty-state h3 { margin: 0 0 8px 0; color: var(--text); }
+.empty-state p { margin: 0; }
+</style>"##
+}
+
 fn format_relative_time(timestamp: &str) -> String {
     // Parse timestamp and return relative time
     // For now, just return the timestamp; in a real impl, use chrono

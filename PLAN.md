@@ -130,7 +130,7 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Response time percentiles
 - [x] Error rate visualization
 - [x] Memory/CPU charts (per instance)
-- [ ] Alerting rules (future)
+- [x] Alerting rules
 
 ### Phase 10: Activity & Notifications ✅
 - [x] Activity feed (all actions)

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -115,6 +115,10 @@ impl Database {
 
             if current_version < 8 {
                 self.migrate_v8(&conn)?;
+            }
+
+            if current_version < 9 {
+                self.migrate_v9(&conn)?;
             }
         }
 
@@ -475,6 +479,72 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (8);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v9: Alerting rules
+    fn migrate_v9(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v9: alerting rules");
+
+        conn.execute_batch(r#"
+            -- Alert rules for monitoring conditions
+            CREATE TABLE IF NOT EXISTS alert_rules (
+                id TEXT PRIMARY KEY,
+                app_name TEXT,
+                name TEXT NOT NULL,
+                description TEXT,
+                metric_type TEXT NOT NULL,
+                condition TEXT NOT NULL,
+                threshold REAL NOT NULL,
+                duration_secs INTEGER NOT NULL DEFAULT 60,
+                severity TEXT NOT NULL DEFAULT 'warning',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                notification_channels TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Alert events (triggered alerts)
+            CREATE TABLE IF NOT EXISTS alert_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id TEXT NOT NULL,
+                app_name TEXT,
+                status TEXT NOT NULL DEFAULT 'firing',
+                metric_value REAL NOT NULL,
+                threshold REAL NOT NULL,
+                message TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                resolved_at TEXT,
+                acknowledged_at TEXT,
+                acknowledged_by TEXT,
+                FOREIGN KEY (rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
+            );
+
+            -- Alert notification log
+            CREATE TABLE IF NOT EXISTS alert_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_event_id INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                sent_at TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (alert_event_id) REFERENCES alert_events(id) ON DELETE CASCADE
+            );
+
+            -- Indices for efficient queries
+            CREATE INDEX IF NOT EXISTS idx_alert_rules_app ON alert_rules(app_name);
+            CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(enabled);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_rule ON alert_events(rule_id);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_status ON alert_events(status, started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_app ON alert_events(app_name, started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_alert_notifications_event ON alert_notifications(alert_event_id);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (9);
         "#)?;
 
         Ok(())
@@ -1814,6 +1884,379 @@ impl Database {
         )?;
         Ok(deleted)
     }
+
+    // ==================== Alert Rule Operations ====================
+
+    pub fn create_alert_rule(&self, rule: &AlertRuleRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO alert_rules (id, app_name, name, description, metric_type, condition, threshold, duration_secs, severity, enabled, notification_channels)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                rule.id, rule.app_name, rule.name, rule.description, rule.metric_type,
+                rule.condition, rule.threshold, rule.duration_secs, rule.severity,
+                rule.enabled, rule.notification_channels
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_alert_rule(&self, id: &str) -> Result<Option<AlertRuleRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, app_name, name, description, metric_type, condition, threshold, duration_secs, severity, enabled, notification_channels, created_at, updated_at
+             FROM alert_rules WHERE id = ?1",
+            params![id],
+            |row| Ok(AlertRuleRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                metric_type: row.get(4)?,
+                condition: row.get(5)?,
+                threshold: row.get(6)?,
+                duration_secs: row.get(7)?,
+                severity: row.get(8)?,
+                enabled: row.get(9)?,
+                notification_channels: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            }),
+        ).optional().context("Failed to get alert rule")
+    }
+
+    pub fn list_alert_rules(&self, app_name: Option<&str>) -> Result<Vec<AlertRuleRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut rules = Vec::new();
+
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<AlertRuleRecord> {
+            Ok(AlertRuleRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                metric_type: row.get(4)?,
+                condition: row.get(5)?,
+                threshold: row.get(6)?,
+                duration_secs: row.get(7)?,
+                severity: row.get(8)?,
+                enabled: row.get(9)?,
+                notification_channels: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        };
+
+        if let Some(name) = app_name {
+            let mut stmt = conn.prepare(
+                "SELECT id, app_name, name, description, metric_type, condition, threshold, duration_secs, severity, enabled, notification_channels, created_at, updated_at
+                 FROM alert_rules WHERE app_name = ?1 ORDER BY created_at DESC"
+            )?;
+            let rows = stmt.query_map(params![name], map_row)?;
+            for row in rows {
+                rules.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, app_name, name, description, metric_type, condition, threshold, duration_secs, severity, enabled, notification_channels, created_at, updated_at
+                 FROM alert_rules ORDER BY created_at DESC"
+            )?;
+            let rows = stmt.query_map([], map_row)?;
+            for row in rows {
+                rules.push(row?);
+            }
+        }
+
+        Ok(rules)
+    }
+
+    pub fn list_enabled_alert_rules(&self) -> Result<Vec<AlertRuleRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut rules = Vec::new();
+
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, name, description, metric_type, condition, threshold, duration_secs, severity, enabled, notification_channels, created_at, updated_at
+             FROM alert_rules WHERE enabled = 1 ORDER BY app_name, metric_type"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(AlertRuleRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                metric_type: row.get(4)?,
+                condition: row.get(5)?,
+                threshold: row.get(6)?,
+                duration_secs: row.get(7)?,
+                severity: row.get(8)?,
+                enabled: row.get(9)?,
+                notification_channels: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })?;
+
+        for row in rows {
+            rules.push(row?);
+        }
+        Ok(rules)
+    }
+
+    pub fn update_alert_rule(&self, rule: &AlertRuleRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE alert_rules SET name = ?2, description = ?3, metric_type = ?4, condition = ?5, threshold = ?6, duration_secs = ?7, severity = ?8, enabled = ?9, notification_channels = ?10, updated_at = datetime('now')
+             WHERE id = ?1",
+            params![
+                rule.id, rule.name, rule.description, rule.metric_type, rule.condition,
+                rule.threshold, rule.duration_secs, rule.severity, rule.enabled, rule.notification_channels
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn toggle_alert_rule(&self, id: &str, enabled: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE alert_rules SET enabled = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, enabled],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_alert_rule(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM alert_rules WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // ==================== Alert Event Operations ====================
+
+    pub fn create_alert_event(&self, rule_id: &str, app_name: Option<&str>, metric_value: f64, threshold: f64, message: Option<&str>) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO alert_events (rule_id, app_name, status, metric_value, threshold, message)
+             VALUES (?1, ?2, 'firing', ?3, ?4, ?5)",
+            params![rule_id, app_name, metric_value, threshold, message],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_alert_event(&self, id: i64) -> Result<Option<AlertEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, rule_id, app_name, status, metric_value, threshold, message, started_at, resolved_at, acknowledged_at, acknowledged_by
+             FROM alert_events WHERE id = ?1",
+            params![id],
+            |row| Ok(AlertEventRecord {
+                id: row.get(0)?,
+                rule_id: row.get(1)?,
+                app_name: row.get(2)?,
+                status: row.get(3)?,
+                metric_value: row.get(4)?,
+                threshold: row.get(5)?,
+                message: row.get(6)?,
+                started_at: row.get(7)?,
+                resolved_at: row.get(8)?,
+                acknowledged_at: row.get(9)?,
+                acknowledged_by: row.get(10)?,
+            }),
+        ).optional().context("Failed to get alert event")
+    }
+
+    pub fn list_alert_events(&self, app_name: Option<&str>, status: Option<&str>, limit: usize) -> Result<Vec<AlertEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut events = Vec::new();
+
+        let query = match (app_name, status) {
+            (Some(_), Some(_)) => "SELECT id, rule_id, app_name, status, metric_value, threshold, message, started_at, resolved_at, acknowledged_at, acknowledged_by
+                                   FROM alert_events WHERE app_name = ?1 AND status = ?2 ORDER BY started_at DESC LIMIT ?3",
+            (Some(_), None) => "SELECT id, rule_id, app_name, status, metric_value, threshold, message, started_at, resolved_at, acknowledged_at, acknowledged_by
+                                FROM alert_events WHERE app_name = ?1 ORDER BY started_at DESC LIMIT ?2",
+            (None, Some(_)) => "SELECT id, rule_id, app_name, status, metric_value, threshold, message, started_at, resolved_at, acknowledged_at, acknowledged_by
+                                FROM alert_events WHERE status = ?1 ORDER BY started_at DESC LIMIT ?2",
+            (None, None) => "SELECT id, rule_id, app_name, status, metric_value, threshold, message, started_at, resolved_at, acknowledged_at, acknowledged_by
+                             FROM alert_events ORDER BY started_at DESC LIMIT ?1",
+        };
+
+        let mut stmt = conn.prepare(query)?;
+        let rows: Box<dyn Iterator<Item = rusqlite::Result<AlertEventRecord>>> = match (app_name, status) {
+            (Some(app), Some(st)) => Box::new(stmt.query_map(params![app, st, limit], |row| {
+                Ok(AlertEventRecord {
+                    id: row.get(0)?,
+                    rule_id: row.get(1)?,
+                    app_name: row.get(2)?,
+                    status: row.get(3)?,
+                    metric_value: row.get(4)?,
+                    threshold: row.get(5)?,
+                    message: row.get(6)?,
+                    started_at: row.get(7)?,
+                    resolved_at: row.get(8)?,
+                    acknowledged_at: row.get(9)?,
+                    acknowledged_by: row.get(10)?,
+                })
+            })?),
+            (Some(app), None) => Box::new(stmt.query_map(params![app, limit], |row| {
+                Ok(AlertEventRecord {
+                    id: row.get(0)?,
+                    rule_id: row.get(1)?,
+                    app_name: row.get(2)?,
+                    status: row.get(3)?,
+                    metric_value: row.get(4)?,
+                    threshold: row.get(5)?,
+                    message: row.get(6)?,
+                    started_at: row.get(7)?,
+                    resolved_at: row.get(8)?,
+                    acknowledged_at: row.get(9)?,
+                    acknowledged_by: row.get(10)?,
+                })
+            })?),
+            (None, Some(st)) => Box::new(stmt.query_map(params![st, limit], |row| {
+                Ok(AlertEventRecord {
+                    id: row.get(0)?,
+                    rule_id: row.get(1)?,
+                    app_name: row.get(2)?,
+                    status: row.get(3)?,
+                    metric_value: row.get(4)?,
+                    threshold: row.get(5)?,
+                    message: row.get(6)?,
+                    started_at: row.get(7)?,
+                    resolved_at: row.get(8)?,
+                    acknowledged_at: row.get(9)?,
+                    acknowledged_by: row.get(10)?,
+                })
+            })?),
+            (None, None) => Box::new(stmt.query_map(params![limit], |row| {
+                Ok(AlertEventRecord {
+                    id: row.get(0)?,
+                    rule_id: row.get(1)?,
+                    app_name: row.get(2)?,
+                    status: row.get(3)?,
+                    metric_value: row.get(4)?,
+                    threshold: row.get(5)?,
+                    message: row.get(6)?,
+                    started_at: row.get(7)?,
+                    resolved_at: row.get(8)?,
+                    acknowledged_at: row.get(9)?,
+                    acknowledged_by: row.get(10)?,
+                })
+            })?),
+        };
+
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    pub fn get_firing_alerts(&self) -> Result<Vec<AlertEventRecord>> {
+        self.list_alert_events(None, Some("firing"), 100)
+    }
+
+    pub fn resolve_alert_event(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE alert_events SET status = 'resolved', resolved_at = datetime('now') WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn acknowledge_alert_event(&self, id: i64, acknowledged_by: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE alert_events SET acknowledged_at = datetime('now'), acknowledged_by = ?2 WHERE id = ?1",
+            params![id, acknowledged_by],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_active_alert_for_rule(&self, rule_id: &str) -> Result<Option<AlertEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, rule_id, app_name, status, metric_value, threshold, message, started_at, resolved_at, acknowledged_at, acknowledged_by
+             FROM alert_events WHERE rule_id = ?1 AND status = 'firing' ORDER BY started_at DESC LIMIT 1",
+            params![rule_id],
+            |row| Ok(AlertEventRecord {
+                id: row.get(0)?,
+                rule_id: row.get(1)?,
+                app_name: row.get(2)?,
+                status: row.get(3)?,
+                metric_value: row.get(4)?,
+                threshold: row.get(5)?,
+                message: row.get(6)?,
+                started_at: row.get(7)?,
+                resolved_at: row.get(8)?,
+                acknowledged_at: row.get(9)?,
+                acknowledged_by: row.get(10)?,
+            }),
+        ).optional().context("Failed to get active alert")
+    }
+
+    // ==================== Alert Notification Operations ====================
+
+    pub fn create_alert_notification(&self, alert_event_id: i64, channel: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO alert_notifications (alert_event_id, channel, status) VALUES (?1, ?2, 'pending')",
+            params![alert_event_id, channel],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn update_notification_status(&self, id: i64, status: &str, error_message: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        if status == "sent" {
+            conn.execute(
+                "UPDATE alert_notifications SET status = ?2, sent_at = datetime('now') WHERE id = ?1",
+                params![id, status],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE alert_notifications SET status = ?2, error_message = ?3 WHERE id = ?1",
+                params![id, status, error_message],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_pending_notifications(&self) -> Result<Vec<AlertNotificationRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut notifications = Vec::new();
+
+        let mut stmt = conn.prepare(
+            "SELECT id, alert_event_id, channel, status, sent_at, error_message, created_at
+             FROM alert_notifications WHERE status = 'pending' ORDER BY created_at"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(AlertNotificationRecord {
+                id: row.get(0)?,
+                alert_event_id: row.get(1)?,
+                channel: row.get(2)?,
+                status: row.get(3)?,
+                sent_at: row.get(4)?,
+                error_message: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+
+        for row in rows {
+            notifications.push(row?);
+        }
+        Ok(notifications)
+    }
+
+    pub fn cleanup_old_alerts(&self, days: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = format!("datetime('now', '-{} days')", days);
+        let deleted = conn.execute(
+            &format!("DELETE FROM alert_events WHERE status = 'resolved' AND resolved_at < {}", cutoff),
+            [],
+        )?;
+        Ok(deleted)
+    }
 }
 
 // ==================== Record Types ====================
@@ -2028,6 +2471,52 @@ pub struct ActivityEventRecord {
     pub actor_type: String,
     pub details: Option<String>,
     pub ip_address: Option<String>,
+    pub created_at: String,
+}
+
+/// Alert rule record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertRuleRecord {
+    pub id: String,
+    pub app_name: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub metric_type: String,
+    pub condition: String,
+    pub threshold: f64,
+    pub duration_secs: i64,
+    pub severity: String,
+    pub enabled: bool,
+    pub notification_channels: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Alert event record (triggered alert)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertEventRecord {
+    pub id: i64,
+    pub rule_id: String,
+    pub app_name: Option<String>,
+    pub status: String,
+    pub metric_value: f64,
+    pub threshold: f64,
+    pub message: Option<String>,
+    pub started_at: String,
+    pub resolved_at: Option<String>,
+    pub acknowledged_at: Option<String>,
+    pub acknowledged_by: Option<String>,
+}
+
+/// Alert notification record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertNotificationRecord {
+    pub id: i64,
+    pub alert_event_id: i64,
+    pub channel: String,
+    pub status: String,
+    pub sent_at: Option<String>,
+    pub error_message: Option<String>,
     pub created_at: String,
 }
 

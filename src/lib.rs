@@ -14,6 +14,7 @@
 
 pub mod acme;
 pub mod addons;
+pub mod alerting;
 pub mod admin;
 pub mod api;
 pub mod auth;

@@ -753,6 +753,54 @@ impl PlatformApi {
                 self.trigger_build(app_name).await
             }
 
+            // Alert rules - platform wide
+            (Method::GET, "/alerts/rules") => self.list_all_alert_rules().await,
+            (Method::POST, "/alerts/rules") => self.create_alert_rule(req).await,
+            (Method::GET, path) if path.starts_with("/alerts/rules/") && !path.contains("/events") => {
+                let rule_id = path.strip_prefix("/alerts/rules/").unwrap_or("");
+                self.get_alert_rule(rule_id).await
+            }
+            (Method::PUT, path) if path.starts_with("/alerts/rules/") => {
+                let rule_id = path.strip_prefix("/alerts/rules/").unwrap_or("");
+                self.update_alert_rule(rule_id, req).await
+            }
+            (Method::DELETE, path) if path.starts_with("/alerts/rules/") => {
+                let rule_id = path.strip_prefix("/alerts/rules/").unwrap_or("");
+                self.delete_alert_rule(rule_id).await
+            }
+            (Method::POST, path) if path.ends_with("/toggle") => {
+                let rule_id = path.strip_prefix("/alerts/rules/").and_then(|p| p.strip_suffix("/toggle")).unwrap_or("");
+                self.toggle_alert_rule(rule_id, req).await
+            }
+
+            // Alert events
+            (Method::GET, "/alerts/events") => self.list_alert_events(None).await,
+            (Method::GET, "/alerts/events/firing") => self.list_firing_alerts().await,
+            (Method::GET, path) if path.starts_with("/alerts/events/") && path.ends_with("/acknowledge") => {
+                let event_id = path.strip_prefix("/alerts/events/").and_then(|p| p.strip_suffix("/acknowledge")).unwrap_or("");
+                self.acknowledge_alert(event_id, req).await
+            }
+            (Method::POST, path) if path.starts_with("/alerts/events/") && path.ends_with("/resolve") => {
+                let event_id = path.strip_prefix("/alerts/events/").and_then(|p| p.strip_suffix("/resolve")).unwrap_or("");
+                self.resolve_alert(event_id).await
+            }
+
+            // Alert rules per app
+            (Method::GET, path) if path.ends_with("/alerts") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/alerts")).unwrap_or("");
+                self.list_app_alert_rules(app_name).await
+            }
+            (Method::GET, path) if path.ends_with("/alerts/events") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/alerts/events")).unwrap_or("");
+                self.list_alert_events(Some(app_name)).await
+            }
+
+            // Alert metadata
+            (Method::GET, "/alerts/metrics") => self.get_available_metrics().await,
+
+            // Evaluate alerts (for manual trigger or cron)
+            (Method::POST, "/alerts/evaluate") => self.evaluate_alerts().await,
+
             _ => Ok(json_error(StatusCode::NOT_FOUND, "Not found")),
         };
 
@@ -2905,11 +2953,328 @@ impl PlatformApi {
                 }
             }
 
+            // Alerts dashboard page
+            (&Method::GET, "/dashboard/alerts") => {
+                let rules = self.db.list_alert_rules(None).unwrap_or_default();
+                let events = self.db.list_alert_events(None, None, 50).unwrap_or_default();
+                let firing = self.db.get_firing_alerts().unwrap_or_default();
+
+                let rules_json: Vec<serde_json::Value> = rules.iter().map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "name": r.name,
+                        "description": r.description,
+                        "app_name": r.app_name,
+                        "metric_type": r.metric_type,
+                        "condition": r.condition,
+                        "threshold": r.threshold,
+                        "severity": r.severity,
+                        "enabled": r.enabled,
+                    })
+                }).collect();
+
+                let events_json: Vec<serde_json::Value> = events.iter().map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "rule_id": e.rule_id,
+                        "app_name": e.app_name,
+                        "status": e.status,
+                        "metric_value": e.metric_value,
+                        "threshold": e.threshold,
+                        "message": e.message,
+                        "started_at": e.started_at,
+                        "resolved_at": e.resolved_at,
+                        "acknowledged_at": e.acknowledged_at,
+                        "acknowledged_by": e.acknowledged_by,
+                    })
+                }).collect();
+
+                let html = dashboard::render_alerts_page(&rules_json, &events_json, firing.len());
+                html_response(StatusCode::OK, html)
+            }
+
             _ => {
                 html_response(StatusCode::NOT_FOUND,
                     r##"<div class="error">Not found</div>"##)
             }
         }
+    }
+
+    // ==================== Alert Management ====================
+
+    async fn list_all_alert_rules(&self) -> Result<Response<Full<Bytes>>> {
+        let rules = self.db.list_alert_rules(None)?;
+        let response = ApiResponse::ok(rules);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn list_app_alert_rules(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        if app_name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "App name is required"));
+        }
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        let rules = self.db.list_alert_rules(Some(app_name))?;
+        let response = ApiResponse::ok(rules);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_alert_rule(&self, rule_id: &str) -> Result<Response<Full<Bytes>>> {
+        if rule_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Rule ID is required"));
+        }
+
+        match self.db.get_alert_rule(rule_id)? {
+            Some(rule) => {
+                let response = ApiResponse::ok(rule);
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            None => Ok(json_error(StatusCode::NOT_FOUND, "Alert rule not found")),
+        }
+    }
+
+    async fn create_alert_rule(
+        self: Arc<Self>,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        let body = req.collect().await?.to_bytes();
+        let create_req: serde_json::Value = serde_json::from_slice(&body)?;
+
+        let name = create_req["name"].as_str().unwrap_or("").to_string();
+        let metric_type = create_req["metric_type"].as_str().unwrap_or("").to_string();
+        let condition = create_req["condition"].as_str().unwrap_or(">").to_string();
+        let threshold = create_req["threshold"].as_f64().unwrap_or(0.0);
+        let app_name = create_req["app_name"].as_str().map(String::from);
+        let description = create_req["description"].as_str().map(String::from);
+        let duration_secs = create_req["duration_secs"].as_i64().unwrap_or(60);
+        let severity = create_req["severity"].as_str().unwrap_or("warning").to_string();
+        let notification_channels = create_req["notification_channels"].as_str().map(String::from);
+
+        if name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Name is required"));
+        }
+        if metric_type.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Metric type is required"));
+        }
+
+        // Validate metric type
+        if crate::alerting::MetricType::from_str(&metric_type).is_none() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid metric type: {}", metric_type)));
+        }
+
+        // Validate condition
+        if crate::alerting::Condition::from_str(&condition).is_none() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid condition: {}", condition)));
+        }
+
+        // Check app exists if specified
+        if let Some(ref app) = app_name {
+            if self.db.get_app(app)?.is_none() {
+                return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+            }
+        }
+
+        let id = format!("alert-{}", uuid::Uuid::new_v4());
+        let rule = crate::db::AlertRuleRecord {
+            id: id.clone(),
+            app_name,
+            name,
+            description,
+            metric_type,
+            condition,
+            threshold,
+            duration_secs,
+            severity,
+            enabled: true,
+            notification_channels,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        self.db.create_alert_rule(&rule)?;
+
+        let created = self.db.get_alert_rule(&id)?;
+        let response = ApiResponse::ok(created);
+        Ok(json_response(StatusCode::CREATED, serde_json::to_string(&response)?))
+    }
+
+    async fn update_alert_rule(
+        self: Arc<Self>,
+        rule_id: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        if rule_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Rule ID is required"));
+        }
+
+        let existing = match self.db.get_alert_rule(rule_id)? {
+            Some(rule) => rule,
+            None => return Ok(json_error(StatusCode::NOT_FOUND, "Alert rule not found")),
+        };
+
+        let body = req.collect().await?.to_bytes();
+        let update_req: serde_json::Value = serde_json::from_slice(&body)?;
+
+        let rule = crate::db::AlertRuleRecord {
+            id: existing.id,
+            app_name: existing.app_name,
+            name: update_req["name"].as_str().map(String::from).unwrap_or(existing.name),
+            description: update_req["description"].as_str().map(String::from).or(existing.description),
+            metric_type: update_req["metric_type"].as_str().map(String::from).unwrap_or(existing.metric_type),
+            condition: update_req["condition"].as_str().map(String::from).unwrap_or(existing.condition),
+            threshold: update_req["threshold"].as_f64().unwrap_or(existing.threshold),
+            duration_secs: update_req["duration_secs"].as_i64().unwrap_or(existing.duration_secs),
+            severity: update_req["severity"].as_str().map(String::from).unwrap_or(existing.severity),
+            enabled: update_req["enabled"].as_bool().unwrap_or(existing.enabled),
+            notification_channels: update_req["notification_channels"].as_str().map(String::from).or(existing.notification_channels),
+            created_at: existing.created_at,
+            updated_at: String::new(),
+        };
+
+        self.db.update_alert_rule(&rule)?;
+
+        let updated = self.db.get_alert_rule(rule_id)?;
+        let response = ApiResponse::ok(updated);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn delete_alert_rule(&self, rule_id: &str) -> Result<Response<Full<Bytes>>> {
+        if rule_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Rule ID is required"));
+        }
+
+        if self.db.get_alert_rule(rule_id)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Alert rule not found"));
+        }
+
+        self.db.delete_alert_rule(rule_id)?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "deleted": true,
+            "id": rule_id,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn toggle_alert_rule(
+        self: Arc<Self>,
+        rule_id: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        if rule_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Rule ID is required"));
+        }
+
+        if self.db.get_alert_rule(rule_id)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Alert rule not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let toggle_req: serde_json::Value = serde_json::from_slice(&body)?;
+        let enabled = toggle_req["enabled"].as_bool().unwrap_or(true);
+
+        self.db.toggle_alert_rule(rule_id, enabled)?;
+
+        let updated = self.db.get_alert_rule(rule_id)?;
+        let response = ApiResponse::ok(updated);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn list_alert_events(&self, app_name: Option<&str>) -> Result<Response<Full<Bytes>>> {
+        let events = self.db.list_alert_events(app_name, None, 100)?;
+        let response = ApiResponse::ok(events);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn list_firing_alerts(&self) -> Result<Response<Full<Bytes>>> {
+        let events = self.db.get_firing_alerts()?;
+        let response = ApiResponse::ok(events);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn acknowledge_alert(
+        self: Arc<Self>,
+        event_id: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        let id: i64 = event_id.parse().map_err(|_| anyhow::anyhow!("Invalid event ID"))?;
+
+        if self.db.get_alert_event(id)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Alert event not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let ack_req: serde_json::Value = serde_json::from_slice(&body)?;
+        let acknowledged_by = ack_req["acknowledged_by"].as_str().unwrap_or("user");
+
+        self.db.acknowledge_alert_event(id, acknowledged_by)?;
+
+        let updated = self.db.get_alert_event(id)?;
+        let response = ApiResponse::ok(updated);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn resolve_alert(&self, event_id: &str) -> Result<Response<Full<Bytes>>> {
+        let id: i64 = event_id.parse().map_err(|_| anyhow::anyhow!("Invalid event ID"))?;
+
+        if self.db.get_alert_event(id)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Alert event not found"));
+        }
+
+        self.db.resolve_alert_event(id)?;
+
+        let updated = self.db.get_alert_event(id)?;
+        let response = ApiResponse::ok(updated);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_available_metrics(&self) -> Result<Response<Full<Bytes>>> {
+        let metrics = crate::alerting::get_available_metrics();
+        let result: Vec<serde_json::Value> = metrics.iter().map(|(id, name, desc)| {
+            serde_json::json!({
+                "id": id,
+                "name": name,
+                "description": desc,
+            })
+        }).collect();
+
+        let conditions = crate::alerting::get_available_conditions();
+        let cond_result: Vec<serde_json::Value> = conditions.iter().map(|(sym, desc)| {
+            serde_json::json!({
+                "symbol": sym,
+                "description": desc,
+            })
+        }).collect();
+
+        let severities = crate::alerting::get_available_severities();
+        let sev_result: Vec<serde_json::Value> = severities.iter().map(|(id, desc)| {
+            serde_json::json!({
+                "id": id,
+                "description": desc,
+            })
+        }).collect();
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "metrics": result,
+            "conditions": cond_result,
+            "severities": sev_result,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn evaluate_alerts(self: Arc<Self>) -> Result<Response<Full<Bytes>>> {
+        let evaluator = crate::alerting::AlertEvaluator::new(Arc::clone(&self.db));
+        let result = evaluator.evaluate_all()?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "fired": result.fired,
+            "ok": result.ok,
+            "no_data": result.no_data,
+            "errors": result.errors,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
 }
 

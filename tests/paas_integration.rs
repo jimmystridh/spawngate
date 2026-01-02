@@ -1416,3 +1416,285 @@ mod e2e_scenarios {
         assert!(!db.get_all_config("app-2").unwrap().is_empty());
     }
 }
+
+// ==================== Alert Tests ====================
+
+mod alert_tests {
+    use super::*;
+    use spawngate::db::AlertRuleRecord;
+
+    fn create_test_alert_rule(id: &str, app_name: Option<&str>) -> AlertRuleRecord {
+        AlertRuleRecord {
+            id: id.to_string(),
+            app_name: app_name.map(String::from),
+            name: format!("Test Alert {}", id),
+            description: Some("Test alert description".to_string()),
+            metric_type: "error_rate".to_string(),
+            condition: ">".to_string(),
+            threshold: 5.0,
+            duration_secs: 60,
+            severity: "warning".to_string(),
+            enabled: true,
+            notification_channels: Some("email,slack".to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_create_alert_rule() {
+        let (db, _tmp) = create_test_db();
+
+        let rule = create_test_alert_rule("rule-1", None);
+        db.create_alert_rule(&rule).unwrap();
+
+        let retrieved = db.get_alert_rule("rule-1").unwrap().unwrap();
+        assert_eq!(retrieved.id, "rule-1");
+        assert_eq!(retrieved.name, "Test Alert rule-1");
+        assert_eq!(retrieved.metric_type, "error_rate");
+        assert_eq!(retrieved.threshold, 5.0);
+        assert!(retrieved.enabled);
+    }
+
+    #[test]
+    fn test_list_alert_rules() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_alert_rule(&create_test_alert_rule("rule-1", None)).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-2", None)).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-3", None)).unwrap();
+
+        let rules = db.list_alert_rules(None).unwrap();
+        assert_eq!(rules.len(), 3);
+    }
+
+    #[test]
+    fn test_list_alert_rules_by_app() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-2", Some("my-app"))).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-3", None)).unwrap();
+
+        let app_rules = db.list_alert_rules(Some("my-app")).unwrap();
+        assert_eq!(app_rules.len(), 2);
+
+        let all_rules = db.list_alert_rules(None).unwrap();
+        assert_eq!(all_rules.len(), 3);
+    }
+
+    #[test]
+    fn test_list_enabled_alert_rules() {
+        let (db, _tmp) = create_test_db();
+
+        let mut rule1 = create_test_alert_rule("rule-1", None);
+        let mut rule2 = create_test_alert_rule("rule-2", None);
+        rule2.enabled = false;
+
+        db.create_alert_rule(&rule1).unwrap();
+        db.create_alert_rule(&rule2).unwrap();
+
+        let enabled = db.list_enabled_alert_rules().unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].id, "rule-1");
+    }
+
+    #[test]
+    fn test_update_alert_rule() {
+        let (db, _tmp) = create_test_db();
+
+        let rule = create_test_alert_rule("rule-1", None);
+        db.create_alert_rule(&rule).unwrap();
+
+        let mut updated = db.get_alert_rule("rule-1").unwrap().unwrap();
+        updated.name = "Updated Name".to_string();
+        updated.threshold = 10.0;
+        updated.severity = "critical".to_string();
+
+        db.update_alert_rule(&updated).unwrap();
+
+        let retrieved = db.get_alert_rule("rule-1").unwrap().unwrap();
+        assert_eq!(retrieved.name, "Updated Name");
+        assert_eq!(retrieved.threshold, 10.0);
+        assert_eq!(retrieved.severity, "critical");
+    }
+
+    #[test]
+    fn test_toggle_alert_rule() {
+        let (db, _tmp) = create_test_db();
+
+        let rule = create_test_alert_rule("rule-1", None);
+        db.create_alert_rule(&rule).unwrap();
+
+        // Disable
+        db.toggle_alert_rule("rule-1", false).unwrap();
+        let retrieved = db.get_alert_rule("rule-1").unwrap().unwrap();
+        assert!(!retrieved.enabled);
+
+        // Re-enable
+        db.toggle_alert_rule("rule-1", true).unwrap();
+        let retrieved = db.get_alert_rule("rule-1").unwrap().unwrap();
+        assert!(retrieved.enabled);
+    }
+
+    #[test]
+    fn test_delete_alert_rule() {
+        let (db, _tmp) = create_test_db();
+
+        let rule = create_test_alert_rule("rule-1", None);
+        db.create_alert_rule(&rule).unwrap();
+
+        db.delete_alert_rule("rule-1").unwrap();
+
+        let retrieved = db.get_alert_rule("rule-1").unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_create_alert_event() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+
+        let event_id = db.create_alert_event(
+            "rule-1",
+            Some("my-app"),
+            7.5,
+            5.0,
+            Some("Error rate exceeded threshold"),
+        ).unwrap();
+
+        let event = db.get_alert_event(event_id).unwrap().unwrap();
+        assert_eq!(event.rule_id, "rule-1");
+        assert_eq!(event.status, "firing");
+        assert_eq!(event.metric_value, 7.5);
+        assert_eq!(event.threshold, 5.0);
+    }
+
+    #[test]
+    fn test_list_alert_events() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+
+        db.create_alert_event("rule-1", Some("my-app"), 7.5, 5.0, Some("Alert 1")).unwrap();
+        db.create_alert_event("rule-1", Some("my-app"), 8.0, 5.0, Some("Alert 2")).unwrap();
+
+        let events = db.list_alert_events(Some("my-app"), None, 10).unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn test_get_firing_alerts() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+
+        let id1 = db.create_alert_event("rule-1", Some("my-app"), 7.5, 5.0, Some("Alert 1")).unwrap();
+        let id2 = db.create_alert_event("rule-1", Some("my-app"), 8.0, 5.0, Some("Alert 2")).unwrap();
+
+        // Initially all firing
+        let firing = db.get_firing_alerts().unwrap();
+        assert_eq!(firing.len(), 2);
+
+        // Resolve one
+        db.resolve_alert_event(id1).unwrap();
+
+        let firing = db.get_firing_alerts().unwrap();
+        assert_eq!(firing.len(), 1);
+        assert_eq!(firing[0].id, id2);
+    }
+
+    #[test]
+    fn test_acknowledge_alert() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+
+        let event_id = db.create_alert_event("rule-1", Some("my-app"), 7.5, 5.0, Some("Alert")).unwrap();
+
+        db.acknowledge_alert_event(event_id, "admin@example.com").unwrap();
+
+        let event = db.get_alert_event(event_id).unwrap().unwrap();
+        assert!(event.acknowledged_at.is_some());
+        assert_eq!(event.acknowledged_by, Some("admin@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_alert() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+
+        let event_id = db.create_alert_event("rule-1", Some("my-app"), 7.5, 5.0, Some("Alert")).unwrap();
+
+        db.resolve_alert_event(event_id).unwrap();
+
+        let event = db.get_alert_event(event_id).unwrap().unwrap();
+        assert_eq!(event.status, "resolved");
+        assert!(event.resolved_at.is_some());
+    }
+
+    #[test]
+    fn test_get_active_alert_for_rule() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+
+        // No alerts yet
+        let active = db.get_active_alert_for_rule("rule-1").unwrap();
+        assert!(active.is_none());
+
+        // Create alert
+        let event_id = db.create_alert_event("rule-1", Some("my-app"), 7.5, 5.0, Some("Alert")).unwrap();
+
+        let active = db.get_active_alert_for_rule("rule-1").unwrap();
+        assert!(active.is_some());
+        assert_eq!(active.unwrap().id, event_id);
+
+        // Resolve it
+        db.resolve_alert_event(event_id).unwrap();
+
+        let active = db.get_active_alert_for_rule("rule-1").unwrap();
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn test_alert_notifications() {
+        let (db, _tmp) = create_test_db();
+
+        db.create_app(&create_test_app("my-app")).unwrap();
+        db.create_alert_rule(&create_test_alert_rule("rule-1", Some("my-app"))).unwrap();
+
+        let event_id = db.create_alert_event("rule-1", Some("my-app"), 7.5, 5.0, Some("Alert")).unwrap();
+
+        // Create notifications
+        let notif1 = db.create_alert_notification(event_id, "email").unwrap();
+        let notif2 = db.create_alert_notification(event_id, "slack").unwrap();
+
+        // Get pending
+        let pending = db.get_pending_notifications().unwrap();
+        assert_eq!(pending.len(), 2);
+
+        // Mark one as sent
+        db.update_notification_status(notif1, "sent", None).unwrap();
+
+        let pending = db.get_pending_notifications().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].channel, "slack");
+
+        // Mark with error
+        db.update_notification_status(notif2, "failed", Some("Connection refused")).unwrap();
+
+        let pending = db.get_pending_notifications().unwrap();
+        assert_eq!(pending.len(), 0);
+    }
+}
