@@ -659,6 +659,14 @@ impl PlatformApi {
             // Key rotation
             (Method::POST, "/secrets/rotate") => self.rotate_encryption_key().await,
 
+            // API Token management
+            (Method::GET, "/api-tokens") => self.list_api_tokens().await,
+            (Method::POST, "/api-tokens") => self.create_api_token(req).await,
+            (Method::DELETE, path) if path.starts_with("/api-tokens/") => {
+                let token_id = path.strip_prefix("/api-tokens/").unwrap_or("");
+                self.delete_api_token(token_id).await
+            }
+
             // Webhook management
             (Method::GET, path) if path.ends_with("/webhook") => {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/webhook")).unwrap_or("");
@@ -1647,6 +1655,119 @@ impl PlatformApi {
         Ok(decrypted)
     }
 
+    // ==================== API Token Management ====================
+
+    async fn list_api_tokens(&self) -> Result<Response<Full<Bytes>>> {
+        let tokens = self.db.list_api_tokens()?;
+
+        // Don't expose the hash, only show metadata
+        let tokens_json: Vec<serde_json::Value> = tokens.iter().map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "name": t.name,
+                "prefix": t.token_prefix,
+                "scopes": t.scopes,
+                "last_used_at": t.last_used_at,
+                "expires_at": t.expires_at,
+                "created_at": t.created_at,
+            })
+        }).collect();
+
+        let response = ApiResponse::ok(tokens_json);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn create_api_token(
+        &self,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        let body = req.collect().await?.to_bytes();
+
+        #[derive(serde::Deserialize)]
+        struct CreateTokenRequest {
+            name: String,
+            scopes: Option<String>,
+            expires_in_days: Option<i64>,
+        }
+
+        let create_req: CreateTokenRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)));
+            }
+        };
+
+        if create_req.name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Token name is required"));
+        }
+
+        // Generate a secure random token
+        use rand::Rng;
+        let token_bytes: [u8; 32] = rand::thread_rng().gen();
+        let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &token_bytes);
+        let token_prefix = &token[..8];
+
+        // Hash the token for storage
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let token_hash = format!("{:x}", hasher.finalize());
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let scopes = create_req.scopes.unwrap_or_else(|| "read".to_string());
+        let expires_at = create_req.expires_in_days.map(|days| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let expires = now + (days as u64 * 86400);
+            // Simple ISO format
+            format!("{}s", expires)
+        });
+
+        let token_record = crate::db::ApiTokenRecord {
+            id: id.clone(),
+            name: create_req.name.clone(),
+            token_hash,
+            token_prefix: token_prefix.to_string(),
+            scopes: scopes.clone(),
+            last_used_at: None,
+            expires_at: expires_at.clone(),
+            created_at: String::new(),
+        };
+
+        self.db.create_api_token(&token_record)?;
+
+        // Return the token only once - it cannot be retrieved again
+        let result = serde_json::json!({
+            "id": id,
+            "name": create_req.name,
+            "token": token,  // Only returned on creation!
+            "prefix": token_prefix,
+            "scopes": scopes,
+            "expires_at": expires_at,
+        });
+
+        let response = ApiResponse::ok(result);
+        Ok(json_response(StatusCode::CREATED, serde_json::to_string(&response)?))
+    }
+
+    async fn delete_api_token(&self, token_id: &str) -> Result<Response<Full<Bytes>>> {
+        if token_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Token ID is required"));
+        }
+
+        if self.db.delete_api_token(token_id)? {
+            let response = ApiResponse::ok(serde_json::json!({
+                "deleted": true,
+                "id": token_id,
+            }));
+            Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+        } else {
+            Ok(json_error(StatusCode::NOT_FOUND, "Token not found"))
+        }
+    }
+
     // ==================== Webhook Management ====================
 
     async fn get_webhook_config(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
@@ -2616,6 +2737,27 @@ impl PlatformApi {
                             r##"<div class="error">Failed to load instances</div>"##)
                     }
                 }
+            }
+
+            // Get encryption key info (JSON for secrets tab)
+            (&Method::GET, p) if p.ends_with("/encryption-key") => {
+                let secrets_manager = self.secrets_manager.read().await;
+                let key_id = secrets_manager.current_key_id().to_string();
+
+                // Get key info from database if available
+                let created_at = if let Ok(Some(key_record)) = self.db.get_current_encryption_key() {
+                    Some(key_record.created_at)
+                } else {
+                    None
+                };
+
+                let response = serde_json::json!({
+                    "key_id": key_id,
+                    "created_at": created_at,
+                    "algorithm": "AES-256-GCM",
+                });
+
+                json_response(StatusCode::OK, serde_json::to_string(&response).unwrap())
             }
 
             _ => {

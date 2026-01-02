@@ -126,6 +126,7 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
     <button class="tab" :class="{{ 'active': activeTab === 'domains' }}" @click="activeTab = 'domains'">Domains</button>
     <button class="tab" :class="{{ 'active': activeTab === 'deploy' }}" @click="activeTab = 'deploy'">Deploy</button>
     <button class="tab" :class="{{ 'active': activeTab === 'webhooks' }}" @click="activeTab = 'webhooks'">Webhooks</button>
+    <button class="tab" :class="{{ 'active': activeTab === 'secrets' }}" @click="activeTab = 'secrets'">Secrets</button>
     <button class="tab" :class="{{ 'active': activeTab === 'logs' }}" @click="activeTab = 'logs'">Logs</button>
     <button class="tab" :class="{{ 'active': activeTab === 'settings' }}" @click="activeTab = 'settings'">Settings</button>
 </div>
@@ -629,6 +630,522 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
                         </template>
                     </div>
                 </template>
+            </div>
+        </div>
+    </template>
+</div>
+
+<div class="tab-content" x-show="activeTab === 'secrets'" x-data="{{
+    secrets: [],
+    auditLog: [],
+    keyInfo: null,
+    loading: true,
+    showAddSecret: false,
+    newSecretKey: '',
+    newSecretValue: '',
+    rotatingKey: false,
+    showRotateConfirm: false,
+    async init() {{
+        await Promise.all([
+            this.loadSecrets(),
+            this.loadAuditLog(),
+            this.loadKeyInfo()
+        ]);
+        this.loading = false;
+    }},
+    async loadSecrets() {{
+        try {{
+            const res = await fetch('/apps/{0}/secrets');
+            if (res.ok) {{
+                const data = await res.json();
+                this.secrets = data.data?.secrets || [];
+            }}
+        }} catch (e) {{ console.error('Failed to load secrets:', e); }}
+    }},
+    async loadAuditLog() {{
+        try {{
+            const res = await fetch('/apps/{0}/secrets/audit');
+            if (res.ok) {{
+                const data = await res.json();
+                this.auditLog = data.data || [];
+            }}
+        }} catch (e) {{ console.error('Failed to load audit log:', e); }}
+    }},
+    async loadKeyInfo() {{
+        try {{
+            const res = await fetch('/dashboard/apps/{0}/encryption-key');
+            if (res.ok) {{
+                const data = await res.json();
+                this.keyInfo = data;
+            }}
+        }} catch (e) {{ console.error('Failed to load key info:', e); }}
+    }},
+    async addSecret() {{
+        if (!this.newSecretKey.trim()) {{
+            showToast('Secret name is required', 'error');
+            return;
+        }}
+        try {{
+            const res = await fetch('/apps/{0}/secrets', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{
+                    secrets: {{ [this.newSecretKey]: this.newSecretValue }}
+                }})
+            }});
+            if (res.ok) {{
+                showToast('Secret added successfully', 'success');
+                this.newSecretKey = '';
+                this.newSecretValue = '';
+                this.showAddSecret = false;
+                await this.loadSecrets();
+                await this.loadAuditLog();
+            }} else {{
+                const data = await res.json();
+                showToast(data.error || 'Failed to add secret', 'error');
+            }}
+        }} catch (e) {{
+            showToast('Failed to add secret', 'error');
+        }}
+    }},
+    async deleteSecret(key) {{
+        if (!confirm(`Delete secret "${{key}}"? This cannot be undone.`)) return;
+        try {{
+            const res = await fetch('/apps/{0}/secrets/' + encodeURIComponent(key), {{
+                method: 'DELETE'
+            }});
+            if (res.ok) {{
+                showToast('Secret deleted', 'success');
+                await this.loadSecrets();
+                await this.loadAuditLog();
+            }} else {{
+                showToast('Failed to delete secret', 'error');
+            }}
+        }} catch (e) {{
+            showToast('Failed to delete secret', 'error');
+        }}
+    }},
+    async rotateKey() {{
+        this.rotatingKey = true;
+        try {{
+            const res = await fetch('/secrets/rotate', {{
+                method: 'POST'
+            }});
+            if (res.ok) {{
+                const data = await res.json();
+                showToast(`Key rotated! ${{data.data?.secrets_re_encrypted || 0}} secrets re-encrypted.`, 'success');
+                this.showRotateConfirm = false;
+                await this.loadKeyInfo();
+                await this.loadAuditLog();
+            }} else {{
+                showToast('Failed to rotate key', 'error');
+            }}
+        }} catch (e) {{
+            showToast('Failed to rotate key', 'error');
+        }}
+        this.rotatingKey = false;
+    }},
+    formatTime(ts) {{
+        if (!ts) return '';
+        const d = new Date(ts);
+        return d.toLocaleString();
+    }},
+    getActionIcon(action) {{
+        switch(action) {{
+            case 'created': return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M12 4v16m8-8H4\"/>';
+            case 'updated': return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z\"/>';
+            case 'deleted': return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16\"/>';
+            case 'accessed': return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M15 12a3 3 0 11-6 0 3 3 0 016 0z\"/><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z\"/>';
+            case 'key_rotated': return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15\"/>';
+            default: return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z\"/>';
+        }}
+    }},
+    getActionClass(action) {{
+        switch(action) {{
+            case 'created': return 'action-created';
+            case 'deleted': return 'action-deleted';
+            case 'key_rotated': return 'action-rotated';
+            default: return 'action-default';
+        }}
+    }}
+}}">
+    <template x-if="loading">
+        <div class="loading-state">
+            <div class="spinner"></div>
+            <span>Loading secrets...</span>
+        </div>
+    </template>
+
+    <template x-if="!loading">
+        <div class="secrets-content">
+            <!-- Encryption Key Info Card -->
+            <div class="card secrets-key-card">
+                <div class="card-header">
+                    <h2>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                        </svg>
+                        Encryption Key
+                    </h2>
+                    <button class="btn btn-secondary btn-sm" @click="showRotateConfirm = true" :disabled="rotatingKey">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Rotate Key
+                    </button>
+                </div>
+                <div class="key-info-grid">
+                    <div class="key-info-item">
+                        <span class="key-info-label">Key ID</span>
+                        <code class="key-info-value" x-text="keyInfo?.key_id?.substring(0, 8) + '...' || 'N/A'"></code>
+                    </div>
+                    <div class="key-info-item">
+                        <span class="key-info-label">Created</span>
+                        <span class="key-info-value" x-text="formatTime(keyInfo?.created_at) || 'N/A'"></span>
+                    </div>
+                    <div class="key-info-item">
+                        <span class="key-info-label">Algorithm</span>
+                        <span class="key-info-value">AES-256-GCM</span>
+                    </div>
+                    <div class="key-info-item">
+                        <span class="key-info-label">Secrets Encrypted</span>
+                        <span class="key-info-value" x-text="secrets.length"></span>
+                    </div>
+                </div>
+
+                <!-- Rotate Key Confirmation -->
+                <div class="rotate-confirm-overlay" x-show="showRotateConfirm" x-cloak>
+                    <div class="rotate-confirm-dialog">
+                        <div class="rotate-confirm-icon">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                            </svg>
+                        </div>
+                        <h3>Rotate Encryption Key?</h3>
+                        <p>This will generate a new encryption key and re-encrypt all secrets. The old key will be kept for decrypting any remaining data.</p>
+                        <p class="text-warning">This operation cannot be undone.</p>
+                        <div class="rotate-confirm-actions">
+                            <button class="btn btn-secondary" @click="showRotateConfirm = false" :disabled="rotatingKey">Cancel</button>
+                            <button class="btn btn-danger" @click="rotateKey()" :disabled="rotatingKey">
+                                <template x-if="rotatingKey">
+                                    <svg class="spinner" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                                    </svg>
+                                </template>
+                                <span x-text="rotatingKey ? 'Rotating...' : 'Rotate Key'"></span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Secrets List Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                        </svg>
+                        Encrypted Secrets
+                    </h2>
+                    <button class="btn btn-primary btn-sm" @click="showAddSecret = true">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                        </svg>
+                        Add Secret
+                    </button>
+                </div>
+
+                <template x-if="secrets.length === 0">
+                    <div class="empty-state small">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                        </svg>
+                        <h3>No Encrypted Secrets</h3>
+                        <p>Add secrets to store sensitive values like API keys and passwords securely.</p>
+                    </div>
+                </template>
+
+                <template x-if="secrets.length > 0">
+                    <div class="secrets-list">
+                        <template x-for="secret in secrets" :key="secret">
+                            <div class="secret-item">
+                                <div class="secret-info">
+                                    <span class="secret-key" x-text="secret"></span>
+                                    <span class="secret-encrypted">
+                                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                                        </svg>
+                                        Encrypted
+                                    </span>
+                                </div>
+                                <div class="secret-actions">
+                                    <button class="btn btn-icon btn-sm btn-danger" @click="deleteSecret(secret)" title="Delete">
+                                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- Add Secret Form -->
+                <div class="add-secret-form" x-show="showAddSecret" x-cloak>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="secret-key">Secret Name</label>
+                            <input type="text" id="secret-key" x-model="newSecretKey" class="input" placeholder="e.g., API_KEY, DB_PASSWORD">
+                            <small>Use SCREAMING_SNAKE_CASE for consistency</small>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="secret-value">Secret Value</label>
+                            <input type="password" id="secret-value" x-model="newSecretValue" class="input" placeholder="Enter secret value">
+                            <small>This value will be encrypted at rest with AES-256-GCM</small>
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" @click="showAddSecret = false; newSecretKey = ''; newSecretValue = ''">Cancel</button>
+                        <button type="button" class="btn btn-primary" @click="addSecret()">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                            </svg>
+                            Encrypt & Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Audit Log Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/>
+                        </svg>
+                        Audit Log
+                    </h2>
+                    <button class="btn btn-secondary btn-sm" @click="loadAuditLog()">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+
+                <template x-if="auditLog.length === 0">
+                    <div class="empty-state small">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                        </svg>
+                        <p>No audit events yet</p>
+                        <p class="text-muted">Secret access events will appear here</p>
+                    </div>
+                </template>
+
+                <template x-if="auditLog.length > 0">
+                    <div class="audit-log-list">
+                        <template x-for="event in auditLog" :key="event.id">
+                            <div class="audit-log-item" :class="getActionClass(event.action)">
+                                <div class="audit-icon">
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16" x-html="getActionIcon(event.action)"></svg>
+                                </div>
+                                <div class="audit-details">
+                                    <div class="audit-header">
+                                        <span class="audit-action" x-text="event.action"></span>
+                                        <code class="audit-key" x-text="event.secret_key"></code>
+                                    </div>
+                                    <div class="audit-meta">
+                                        <span class="audit-actor" x-show="event.actor" x-text="event.actor"></span>
+                                        <span class="audit-ip" x-show="event.ip_address" x-text="event.ip_address"></span>
+                                        <span class="audit-time" x-text="formatTime(event.created_at)"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+
+            <!-- API Tokens Card -->
+            <div class="card" x-data="{{
+                tokens: [],
+                showCreateToken: false,
+                newTokenName: '',
+                newTokenScopes: 'read,write',
+                newTokenExpires: '',
+                createdToken: null,
+                async loadTokens() {{
+                    try {{
+                        const res = await fetch('/api-tokens');
+                        if (res.ok) {{
+                            const data = await res.json();
+                            this.tokens = data.data || [];
+                        }}
+                    }} catch (e) {{ console.error('Failed to load tokens:', e); }}
+                }},
+                async createToken() {{
+                    if (!this.newTokenName.trim()) {{
+                        showToast('Token name is required', 'error');
+                        return;
+                    }}
+                    try {{
+                        const res = await fetch('/api-tokens', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify({{
+                                name: this.newTokenName,
+                                scopes: this.newTokenScopes,
+                                expires_in_days: this.newTokenExpires ? parseInt(this.newTokenExpires) : null
+                            }})
+                        }});
+                        if (res.ok) {{
+                            const data = await res.json();
+                            this.createdToken = data.data;
+                            this.newTokenName = '';
+                            this.newTokenScopes = 'read,write';
+                            this.newTokenExpires = '';
+                            this.showCreateToken = false;
+                            await this.loadTokens();
+                            showToast('API token created!', 'success');
+                        }} else {{
+                            const data = await res.json();
+                            showToast(data.error || 'Failed to create token', 'error');
+                        }}
+                    }} catch (e) {{
+                        showToast('Failed to create token', 'error');
+                    }}
+                }},
+                async deleteToken(id, name) {{
+                    if (!confirm(`Delete API token "${{name}}"? This cannot be undone.`)) return;
+                    try {{
+                        const res = await fetch('/api-tokens/' + id, {{ method: 'DELETE' }});
+                        if (res.ok) {{
+                            showToast('Token deleted', 'success');
+                            await this.loadTokens();
+                        }} else {{
+                            showToast('Failed to delete token', 'error');
+                        }}
+                    }} catch (e) {{
+                        showToast('Failed to delete token', 'error');
+                    }}
+                }},
+                copyToken() {{
+                    if (this.createdToken?.token) {{
+                        navigator.clipboard.writeText(this.createdToken.token);
+                        showToast('Token copied to clipboard', 'success');
+                    }}
+                }}
+            }}" x-init="loadTokens()">
+                <div class="card-header">
+                    <h2>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                        </svg>
+                        API Tokens
+                    </h2>
+                    <button class="btn btn-primary btn-sm" @click="showCreateToken = true">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                        </svg>
+                        Create Token
+                    </button>
+                </div>
+
+                <!-- Created Token Alert (show only once after creation) -->
+                <div class="token-created-alert" x-show="createdToken" x-cloak>
+                    <div class="token-alert-header">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                        </svg>
+                        <strong>Save this token now!</strong>
+                    </div>
+                    <p>You won't be able to see it again after you close this message.</p>
+                    <div class="token-display">
+                        <code x-text="createdToken?.token"></code>
+                        <button class="btn btn-icon btn-sm" @click="copyToken()" title="Copy token">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" @click="createdToken = null">I've saved my token</button>
+                </div>
+
+                <template x-if="tokens.length === 0 && !createdToken">
+                    <div class="empty-state small">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                        </svg>
+                        <h3>No API Tokens</h3>
+                        <p>Create tokens for programmatic access to the API.</p>
+                    </div>
+                </template>
+
+                <template x-if="tokens.length > 0">
+                    <div class="api-tokens-list">
+                        <template x-for="token in tokens" :key="token.id">
+                            <div class="api-token-item">
+                                <div class="api-token-info">
+                                    <div class="api-token-name" x-text="token.name"></div>
+                                    <div class="api-token-meta">
+                                        <code class="token-prefix" x-text="token.prefix + '...'"></code>
+                                        <span class="token-scopes" x-text="token.scopes"></span>
+                                        <span class="token-last-used" x-show="token.last_used_at" x-text="'Last used: ' + formatTime(token.last_used_at)"></span>
+                                        <span class="token-expires" x-show="token.expires_at" x-text="'Expires: ' + formatTime(token.expires_at)"></span>
+                                    </div>
+                                </div>
+                                <button class="btn btn-icon btn-sm btn-danger" @click="deleteToken(token.id, token.name)" title="Delete">
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- Create Token Form -->
+                <div class="create-token-form" x-show="showCreateToken" x-cloak>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="token-name">Token Name</label>
+                            <input type="text" id="token-name" x-model="newTokenName" class="input" placeholder="e.g., CI/CD Pipeline">
+                            <small>A descriptive name to identify this token</small>
+                        </div>
+                    </div>
+                    <div class="form-row two-col">
+                        <div class="form-group">
+                            <label for="token-scopes">Scopes</label>
+                            <select id="token-scopes" x-model="newTokenScopes" class="select">
+                                <option value="read">Read only</option>
+                                <option value="read,write">Read & Write</option>
+                                <option value="read,write,admin">Full access</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="token-expires">Expires In</label>
+                            <select id="token-expires" x-model="newTokenExpires" class="select">
+                                <option value="">Never</option>
+                                <option value="30">30 days</option>
+                                <option value="90">90 days</option>
+                                <option value="365">1 year</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" @click="showCreateToken = false">Cancel</button>
+                        <button type="button" class="btn btn-primary" @click="createToken()">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                            </svg>
+                            Generate Token
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     </template>
@@ -4781,6 +5298,347 @@ body {
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     margin-bottom: 1rem;
+}
+
+/* Secrets & Security */
+.secrets-content {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.secrets-key-card {
+    position: relative;
+}
+
+.secrets-key-card h2 {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.key-info-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.key-info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.key-info-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.key-info-value {
+    font-size: 0.9375rem;
+    font-weight: 500;
+}
+
+.key-info-value code {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    background: var(--bg-secondary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.8125rem;
+}
+
+.rotate-confirm-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.5rem;
+    z-index: 10;
+}
+
+.rotate-confirm-dialog {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    padding: 2rem;
+    max-width: 400px;
+    text-align: center;
+}
+
+.rotate-confirm-icon {
+    color: var(--warning);
+    margin-bottom: 1rem;
+}
+
+.rotate-confirm-dialog h3 {
+    margin: 0 0 0.75rem 0;
+    font-size: 1.125rem;
+}
+
+.rotate-confirm-dialog p {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.rotate-confirm-dialog .text-warning {
+    color: var(--warning);
+    font-weight: 500;
+}
+
+.rotate-confirm-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    margin-top: 1.5rem;
+}
+
+.secrets-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.secret-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.875rem 1rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+}
+
+.secret-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.secret-key {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-weight: 600;
+    font-size: 0.9375rem;
+}
+
+.secret-encrypted {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.75rem;
+    color: var(--success);
+    background: rgba(16, 185, 129, 0.1);
+    padding: 0.25rem 0.5rem;
+    border-radius: 1rem;
+}
+
+.add-secret-form {
+    margin-top: 1.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border-color);
+}
+
+/* Audit Log */
+.audit-log-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.audit-log-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    border-left: 3px solid var(--border-color);
+}
+
+.audit-log-item.action-created {
+    border-left-color: var(--success);
+}
+
+.audit-log-item.action-created .audit-icon {
+    color: var(--success);
+}
+
+.audit-log-item.action-deleted {
+    border-left-color: var(--danger);
+}
+
+.audit-log-item.action-deleted .audit-icon {
+    color: var(--danger);
+}
+
+.audit-log-item.action-rotated {
+    border-left-color: var(--primary);
+}
+
+.audit-log-item.action-rotated .audit-icon {
+    color: var(--primary);
+}
+
+.audit-icon {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+}
+
+.audit-details {
+    flex: 1;
+    min-width: 0;
+}
+
+.audit-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+}
+
+.audit-action {
+    font-weight: 600;
+    font-size: 0.875rem;
+    text-transform: capitalize;
+}
+
+.audit-key {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    background: var(--bg-tertiary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.audit-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.audit-actor::before,
+.audit-ip::before {
+    content: '';
+    display: inline-block;
+    width: 3px;
+    height: 3px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    margin-right: 0.5rem;
+    vertical-align: middle;
+}
+
+.audit-actor::before {
+    display: none;
+}
+
+/* API Tokens */
+.api-tokens-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.api-token-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.875rem 1rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+}
+
+.api-token-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.api-token-name {
+    font-weight: 600;
+    font-size: 0.9375rem;
+}
+
+.api-token-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.token-prefix {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    background: var(--bg-tertiary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.token-scopes {
+    background: var(--bg-tertiary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.token-created-alert {
+    margin-bottom: 1rem;
+    padding: 1rem;
+    background: rgba(234, 179, 8, 0.1);
+    border: 1px solid var(--warning);
+    border-radius: 0.5rem;
+}
+
+.token-alert-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--warning);
+    margin-bottom: 0.5rem;
+}
+
+.token-created-alert p {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.token-display {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    padding: 0.75rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+}
+
+.token-display code {
+    flex: 1;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    word-break: break-all;
+}
+
+.create-token-form {
+    margin-top: 1.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border-color);
 }
 
 /* Header Actions */

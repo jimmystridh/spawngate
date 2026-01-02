@@ -119,11 +119,11 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Build status badges preview
 - [x] Deploy key management
 
-### Phase 8: Secrets & Security
-- [ ] Secrets manager with audit log
-- [ ] Key rotation UI
-- [ ] Access audit trail
-- [ ] API token management
+### Phase 8: Secrets & Security ✅
+- [x] Secrets manager with audit log
+- [x] Key rotation UI
+- [x] Access audit trail
+- [x] API token management
 
 ### Phase 9: Metrics & Monitoring
 - [ ] Request rate graphs

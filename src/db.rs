@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -103,6 +103,10 @@ impl Database {
 
             if current_version < 5 {
                 self.migrate_v5(&conn)?;
+            }
+
+            if current_version < 6 {
+                self.migrate_v6(&conn)?;
             }
         }
 
@@ -346,6 +350,47 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (5);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v6: API tokens
+    fn migrate_v6(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v6: API tokens");
+
+        conn.execute_batch(r#"
+            -- API tokens for programmatic access
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                token_prefix TEXT NOT NULL,
+                scopes TEXT NOT NULL DEFAULT 'read',
+                last_used_at TEXT,
+                expires_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- API token usage log
+            CREATE TABLE IF NOT EXISTS api_token_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                resource TEXT,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (token_id) REFERENCES api_tokens(id) ON DELETE CASCADE
+            );
+
+            -- Index for token lookup
+            CREATE INDEX IF NOT EXISTS idx_api_tokens_prefix ON api_tokens(token_prefix);
+            CREATE INDEX IF NOT EXISTS idx_api_token_log_token ON api_token_log(token_id);
+            CREATE INDEX IF NOT EXISTS idx_api_token_log_time ON api_token_log(created_at);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (6);
         "#)?;
 
         Ok(())
@@ -1257,6 +1302,158 @@ impl Database {
 
         Ok(None)
     }
+
+    // ==================== API Token Operations ====================
+
+    /// Create a new API token
+    pub fn create_api_token(&self, token: &ApiTokenRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO api_tokens (id, name, token_hash, token_prefix, scopes, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                token.id, token.name, token.token_hash, token.token_prefix,
+                token.scopes, token.expires_at
+            ],
+        )?;
+        info!(token_id = %token.id, name = %token.name, "API token created");
+        Ok(())
+    }
+
+    /// Get all API tokens (without hash)
+    pub fn list_api_tokens(&self) -> Result<Vec<ApiTokenRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, token_hash, token_prefix, scopes, last_used_at, expires_at, created_at
+             FROM api_tokens ORDER BY created_at DESC"
+        )?;
+
+        let tokens = stmt.query_map([], |row| {
+            Ok(ApiTokenRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                token_hash: row.get(2)?,
+                token_prefix: row.get(3)?,
+                scopes: row.get(4)?,
+                last_used_at: row.get(5)?,
+                expires_at: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(tokens)
+    }
+
+    /// Get API token by ID
+    pub fn get_api_token(&self, id: &str) -> Result<Option<ApiTokenRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, token_hash, token_prefix, scopes, last_used_at, expires_at, created_at
+             FROM api_tokens WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ApiTokenRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    token_hash: row.get(2)?,
+                    token_prefix: row.get(3)?,
+                    scopes: row.get(4)?,
+                    last_used_at: row.get(5)?,
+                    expires_at: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to get API token")
+    }
+
+    /// Find API token by prefix (for quick lookup)
+    pub fn find_api_token_by_prefix(&self, prefix: &str) -> Result<Option<ApiTokenRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, token_hash, token_prefix, scopes, last_used_at, expires_at, created_at
+             FROM api_tokens WHERE token_prefix = ?1",
+            params![prefix],
+            |row| {
+                Ok(ApiTokenRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    token_hash: row.get(2)?,
+                    token_prefix: row.get(3)?,
+                    scopes: row.get(4)?,
+                    last_used_at: row.get(5)?,
+                    expires_at: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to find API token")
+    }
+
+    /// Update token last used timestamp
+    pub fn update_api_token_last_used(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE api_tokens SET last_used_at = datetime('now') WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete an API token
+    pub fn delete_api_token(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute("DELETE FROM api_tokens WHERE id = ?1", params![id])?;
+        if rows > 0 {
+            info!(token_id = %id, "API token deleted");
+        }
+        Ok(rows > 0)
+    }
+
+    /// Log API token usage
+    pub fn log_api_token_usage(
+        &self,
+        token_id: &str,
+        action: &str,
+        resource: Option<&str>,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO api_token_log (token_id, action, resource, ip_address, user_agent)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![token_id, action, resource, ip_address, user_agent],
+        )?;
+        Ok(())
+    }
+
+    /// Get API token usage log
+    pub fn get_api_token_log(&self, token_id: &str, limit: usize) -> Result<Vec<ApiTokenLogRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, token_id, action, resource, ip_address, user_agent, created_at
+             FROM api_token_log WHERE token_id = ?1 ORDER BY created_at DESC LIMIT ?2"
+        )?;
+
+        let logs = stmt.query_map(params![token_id, limit as i64], |row| {
+            Ok(ApiTokenLogRecord {
+                id: row.get(0)?,
+                token_id: row.get(1)?,
+                action: row.get(2)?,
+                resource: row.get(3)?,
+                ip_address: row.get(4)?,
+                user_agent: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(logs)
+    }
 }
 
 // ==================== Record Types ====================
@@ -1405,6 +1602,31 @@ pub struct BuildStatusRecord {
     pub status: String,
     pub commit_sha: Option<String>,
     pub updated_at: String,
+}
+
+/// API token record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiTokenRecord {
+    pub id: String,
+    pub name: String,
+    pub token_hash: String,
+    pub token_prefix: String,
+    pub scopes: String,
+    pub last_used_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+}
+
+/// API token usage log record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiTokenLogRecord {
+    pub id: i64,
+    pub token_id: String,
+    pub action: String,
+    pub resource: Option<String>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub created_at: String,
 }
 
 #[cfg(test)]
