@@ -112,12 +112,12 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Add-on credentials (with copy button)
 - [x] Usage metrics per add-on
 
-### Phase 7: Webhooks & CI
-- [ ] Webhook configuration UI
-- [ ] GitHub/GitLab integration wizard
-- [ ] Webhook event log
-- [ ] Build status badges preview
-- [ ] Deploy key management
+### Phase 7: Webhooks & CI ✅
+- [x] Webhook configuration UI
+- [x] GitHub/GitLab integration wizard
+- [x] Webhook event log
+- [x] Build status badges preview
+- [x] Deploy key management
 
 ### Phase 8: Secrets & Security
 - [ ] Secrets manager with audit log

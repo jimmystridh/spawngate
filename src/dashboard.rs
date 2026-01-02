@@ -125,6 +125,7 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
     <button class="tab" :class="{{ 'active': activeTab === 'config' }}" @click="activeTab = 'config'">Config Vars</button>
     <button class="tab" :class="{{ 'active': activeTab === 'domains' }}" @click="activeTab = 'domains'">Domains</button>
     <button class="tab" :class="{{ 'active': activeTab === 'deploy' }}" @click="activeTab = 'deploy'">Deploy</button>
+    <button class="tab" :class="{{ 'active': activeTab === 'webhooks' }}" @click="activeTab = 'webhooks'">Webhooks</button>
     <button class="tab" :class="{{ 'active': activeTab === 'logs' }}" @click="activeTab = 'logs'">Logs</button>
     <button class="tab" :class="{{ 'active': activeTab === 'settings' }}" @click="activeTab = 'settings'">Settings</button>
 </div>
@@ -359,6 +360,278 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
             <div class="loading">Loading deployments...</div>
         </div>
     </div>
+</div>
+
+<div class="tab-content" x-show="activeTab === 'webhooks'" x-data="{{
+    webhookConfig: null,
+    webhookEvents: [],
+    loading: true,
+    hasWebhook: false,
+    showSetupWizard: false,
+    async init() {{
+        await this.loadWebhookConfig();
+        await this.loadWebhookEvents();
+    }},
+    async loadWebhookConfig() {{
+        try {{
+            const res = await fetch('/apps/{0}/webhook');
+            if (res.ok) {{
+                const data = await res.json();
+                if (data.data) {{
+                    this.webhookConfig = data.data;
+                    this.hasWebhook = true;
+                }}
+            }}
+        }} catch (e) {{ }}
+        this.loading = false;
+    }},
+    async loadWebhookEvents() {{
+        try {{
+            const res = await fetch('/apps/{0}/webhook/events');
+            if (res.ok) {{
+                const data = await res.json();
+                this.webhookEvents = data.data || [];
+            }}
+        }} catch (e) {{ }}
+    }},
+    async deleteWebhook() {{
+        if (!confirm('Are you sure you want to disable webhooks? This will stop automatic deployments.')) return;
+        try {{
+            const res = await fetch('/apps/{0}/webhook', {{ method: 'DELETE' }});
+            if (res.ok) {{
+                this.webhookConfig = null;
+                this.hasWebhook = false;
+                showToast('Webhook deleted', 'success');
+            }}
+        }} catch (e) {{
+            showToast('Failed to delete webhook', 'error');
+        }}
+    }},
+    copyToClipboard(text) {{
+        navigator.clipboard.writeText(text);
+        showToast('Copied to clipboard', 'success');
+    }},
+    getEventIcon(eventType) {{
+        switch(eventType) {{
+            case 'push': return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12\"/>';
+            case 'pull_request': return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M17 16v2a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a2 2 0 012-2h2m3-4H9a2 2 0 00-2 2v7a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-1m-1 4l-3 3m0 0l-3-3m3 3V3\"/>';
+            default: return '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z\"/>';
+        }}
+    }},
+    formatTime(timestamp) {{
+        if (!timestamp) return '';
+        const date = new Date(timestamp);
+        return date.toLocaleString();
+    }}
+}}">
+    <template x-if="loading">
+        <div class="loading-state">
+            <div class="spinner"></div>
+            <p>Loading webhook configuration...</p>
+        </div>
+    </template>
+
+    <template x-if="!loading && !hasWebhook">
+        <div class="webhook-setup">
+            <div class="card">
+                <div class="empty-state">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="64" height="64">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>
+                    </svg>
+                    <h3>Enable Automatic Deployments</h3>
+                    <p>Connect your GitHub or GitLab repository to deploy automatically when you push code.</p>
+                    <button class="btn btn-primary btn-lg" @click="showModal = 'setup-webhook'">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+                        </svg>
+                        Set Up Webhook
+                    </button>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <template x-if="!loading && hasWebhook">
+        <div>
+            <!-- Webhook Configuration Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>Webhook Configuration</h2>
+                    <div class="header-actions">
+                        <button class="btn btn-sm btn-secondary" @click="showModal = 'edit-webhook'">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                            </svg>
+                            Edit
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" @click="deleteWebhook()">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                            </svg>
+                            Disable
+                        </button>
+                    </div>
+                </div>
+
+                <div class="webhook-config-grid">
+                    <div class="config-item">
+                        <span class="config-label">Provider</span>
+                        <span class="config-value provider-badge" :class="'provider-' + webhookConfig?.provider">
+                            <template x-if="webhookConfig?.provider === 'github'">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                            </template>
+                            <template x-if="webhookConfig?.provider === 'gitlab'">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.452.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024"/></svg>
+                            </template>
+                            <span x-text="webhookConfig?.provider"></span>
+                        </span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-label">Deploy Branch</span>
+                        <span class="config-value"><code x-text="webhookConfig?.deploy_branch"></code></span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-label">Auto Deploy</span>
+                        <span class="config-value">
+                            <span class="status-badge" :class="webhookConfig?.auto_deploy ? 'status-running' : 'status-idle'" x-text="webhookConfig?.auto_deploy ? 'Enabled' : 'Disabled'"></span>
+                        </span>
+                    </div>
+                    <div class="config-item">
+                        <span class="config-label">Status Updates</span>
+                        <span class="config-value">
+                            <span class="status-badge" :class="webhookConfig?.has_status_token ? 'status-running' : 'status-idle'" x-text="webhookConfig?.has_status_token ? 'Enabled' : 'Disabled'"></span>
+                        </span>
+                    </div>
+                </div>
+
+                <div class="webhook-url-section">
+                    <h4>Webhook URL</h4>
+                    <p class="text-muted">Add this URL to your repository's webhook settings.</p>
+                    <div class="webhook-url-box">
+                        <code x-text="webhookConfig?.webhook_url"></code>
+                        <button class="btn btn-icon btn-sm" @click="copyToClipboard(webhookConfig?.webhook_url)" title="Copy URL">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="webhook-secret-section">
+                    <h4>Webhook Secret</h4>
+                    <p class="text-muted">Use this secret to verify webhook payloads.</p>
+                    <div class="webhook-secret-box" x-data="{{ showSecret: false }}">
+                        <code x-show="!showSecret">••••••••••••••••••••••••</code>
+                        <code x-show="showSecret" x-cloak x-text="webhookConfig?.secret"></code>
+                        <div class="secret-actions">
+                            <button class="btn btn-icon btn-sm" @click="showSecret = !showSecret" :title="showSecret ? 'Hide' : 'Show'">
+                                <svg x-show="!showSecret" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                                </svg>
+                                <svg x-show="showSecret" x-cloak fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                                </svg>
+                            </button>
+                            <button class="btn btn-icon btn-sm" @click="copyToClipboard(webhookConfig?.secret)" title="Copy Secret">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Build Status Badge Card -->
+            <div class="card">
+                <h2>Build Status Badge</h2>
+                <p class="text-muted">Add this badge to your README to show the current build status.</p>
+                <div class="badge-preview-section">
+                    <div class="badge-preview">
+                        <img :src="'/apps/{0}/badge.svg'" alt="Build Status" />
+                    </div>
+                    <div class="badge-code">
+                        <h4>Markdown</h4>
+                        <div class="code-box">
+                            <code>[![Build Status]({{window.location.origin}}/apps/{0}/badge.svg)]({{window.location.origin}}/apps/{0})</code>
+                            <button class="btn btn-icon btn-sm" @click="copyToClipboard('[![Build Status](' + window.location.origin + '/apps/{0}/badge.svg)](' + window.location.origin + '/apps/{0})')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <h4>HTML</h4>
+                        <div class="code-box">
+                            <code>&lt;img src="{{window.location.origin}}/apps/{0}/badge.svg" alt="Build Status"&gt;</code>
+                            <button class="btn btn-icon btn-sm" @click="copyToClipboard('<img src=\"' + window.location.origin + '/apps/{0}/badge.svg\" alt=\"Build Status\">')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Webhook Events Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>Recent Webhook Events</h2>
+                    <button class="btn btn-sm btn-secondary" @click="loadWebhookEvents()">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                <template x-if="webhookEvents.length === 0">
+                    <div class="empty-state small">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                        </svg>
+                        <p>No webhook events yet</p>
+                        <p class="text-muted">Events will appear here when your repository sends webhooks</p>
+                    </div>
+                </template>
+                <template x-if="webhookEvents.length > 0">
+                    <div class="webhook-events-list">
+                        <template x-for="event in webhookEvents" :key="event.id">
+                            <div class="webhook-event-item">
+                                <div class="event-icon" :class="event.triggered_deploy ? 'deployed' : ''">
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20" x-html="getEventIcon(event.event_type)"></svg>
+                                </div>
+                                <div class="event-details">
+                                    <div class="event-header">
+                                        <span class="event-type" x-text="event.event_type"></span>
+                                        <span class="event-branch" x-show="event.branch">
+                                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+                                            </svg>
+                                            <span x-text="event.branch"></span>
+                                        </span>
+                                    </div>
+                                    <div class="event-meta">
+                                        <span class="event-commit" x-show="event.commit_sha">
+                                            <code x-text="event.commit_sha?.substring(0, 7)"></code>
+                                        </span>
+                                        <span class="event-message" x-show="event.commit_message" x-text="event.commit_message?.substring(0, 50) + (event.commit_message?.length > 50 ? '...' : '')"></span>
+                                    </div>
+                                    <div class="event-footer">
+                                        <span class="event-author" x-show="event.author" x-text="event.author"></span>
+                                        <span class="event-time" x-text="formatTime(event.created_at)"></span>
+                                    </div>
+                                </div>
+                                <div class="event-status">
+                                    <span class="status-badge" :class="event.triggered_deploy ? 'status-running' : 'status-idle'" x-text="event.triggered_deploy ? 'Deployed' : 'Skipped'"></span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
 </div>
 
 <div class="tab-content" x-show="activeTab === 'logs'" x-data="{{
@@ -2141,6 +2414,227 @@ git push spawngate main
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-primary" @click="showModal = null; reset()">Done</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Setup Webhook Modal -->
+    <div class="modal-backdrop" x-show="showModal === 'setup-webhook'" x-cloak
+        @click.self="showModal = null" @keydown.escape.window="showModal = null">
+        <div class="modal modal-lg" @click.stop x-data="{
+            step: 1,
+            provider: 'github',
+            deployBranch: 'main',
+            autoDeploy: true,
+            statusToken: '',
+            repoName: '',
+            isCreating: false,
+            createdWebhook: null,
+            error: '',
+            reset() {
+                this.step = 1;
+                this.provider = 'github';
+                this.deployBranch = 'main';
+                this.autoDeploy = true;
+                this.statusToken = '';
+                this.repoName = '';
+                this.isCreating = false;
+                this.createdWebhook = null;
+                this.error = '';
+            },
+            async createWebhook() {
+                this.isCreating = true;
+                this.error = '';
+                try {
+                    const res = await fetch('/apps/' + currentApp + '/webhook', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            provider: this.provider,
+                            deploy_branch: this.deployBranch,
+                            auto_deploy: this.autoDeploy,
+                            status_token: this.statusToken || null,
+                            repo_name: this.repoName || null
+                        })
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        this.createdWebhook = data.data;
+                        this.step = 3;
+                        // Refresh webhook config in parent
+                        if (window.Alpine) {
+                            const webhookTab = document.querySelector('[x-show=\"activeTab === \\'webhooks\\'\"]');
+                            if (webhookTab && webhookTab.__x) {
+                                webhookTab.__x.$data.loadWebhookConfig();
+                            }
+                        }
+                    } else {
+                        const err = await res.json();
+                        this.error = err.error || 'Failed to create webhook';
+                    }
+                } catch (e) {
+                    this.error = 'Failed to create webhook: ' + e.message;
+                }
+                this.isCreating = false;
+            }
+        }">
+            <div class="modal-header">
+                <h2 x-text="step === 3 ? 'Webhook Created!' : 'Set Up Webhook'"></h2>
+                <button class="close-btn" @click="showModal = null; reset()">&times;</button>
+            </div>
+
+            <!-- Step Indicator -->
+            <div class="wizard-steps" x-show="step < 3">
+                <div class="wizard-step" :class="{ 'active': step === 1, 'completed': step > 1 }">
+                    <span class="step-number">1</span>
+                    <span class="step-label">Provider</span>
+                </div>
+                <div class="wizard-step" :class="{ 'active': step === 2, 'completed': step > 2 }">
+                    <span class="step-number">2</span>
+                    <span class="step-label">Configure</span>
+                </div>
+                <div class="wizard-step" :class="{ 'active': step === 3 }">
+                    <span class="step-number">3</span>
+                    <span class="step-label">Connect</span>
+                </div>
+            </div>
+
+            <!-- Step 1: Choose Provider -->
+            <div x-show="step === 1">
+                <div class="modal-body">
+                    <p class="text-muted">Choose your Git hosting provider:</p>
+                    <div class="provider-grid">
+                        <label class="provider-card" :class="{ 'selected': provider === 'github' }">
+                            <input type="radio" name="provider" value="github" x-model="provider">
+                            <div class="provider-card-content">
+                                <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                                <span class="provider-name">GitHub</span>
+                            </div>
+                        </label>
+                        <label class="provider-card" :class="{ 'selected': provider === 'gitlab' }">
+                            <input type="radio" name="provider" value="gitlab" x-model="provider">
+                            <div class="provider-card-content">
+                                <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor"><path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.452.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024"/></svg>
+                                <span class="provider-name">GitLab</span>
+                            </div>
+                        </label>
+                        <label class="provider-card" :class="{ 'selected': provider === 'bitbucket' }">
+                            <input type="radio" name="provider" value="bitbucket" x-model="provider">
+                            <div class="provider-card-content">
+                                <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor"><path d="M.778 1.211a.768.768 0 00-.768.892l3.263 19.81c.084.5.515.868 1.022.869H19.95a.772.772 0 00.77-.646l3.27-20.03a.768.768 0 00-.768-.891zM14.52 15.53H9.522L8.17 8.466h7.561z"/></svg>
+                                <span class="provider-name">Bitbucket</span>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @click="showModal = null; reset()">Cancel</button>
+                    <button type="button" class="btn btn-primary" @click="step = 2">
+                        Next
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 2: Configure -->
+            <div x-show="step === 2">
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="webhook-branch">Deploy Branch</label>
+                        <input type="text" id="webhook-branch" x-model="deployBranch" class="input" placeholder="main">
+                        <small>Pushes to this branch will trigger deployments</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="webhook-repo">Repository (optional)</label>
+                        <input type="text" id="webhook-repo" x-model="repoName" class="input" placeholder="owner/repo">
+                        <small>Used for status updates and verification</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="webhook-token">Status Token (optional)</label>
+                        <input type="password" id="webhook-token" x-model="statusToken" class="input" placeholder="Personal access token">
+                        <small>Required to post build status back to your repository</small>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-info">
+                            <strong>Auto Deploy</strong>
+                            <small>Automatically deploy when code is pushed</small>
+                        </div>
+                        <label class="toggle">
+                            <input type="checkbox" x-model="autoDeploy">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="modal-error" x-show="error" x-text="error"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @click="step = 1">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+                        </svg>
+                        Back
+                    </button>
+                    <button type="button" class="btn btn-primary" @click="createWebhook()" :disabled="isCreating">
+                        <span x-show="!isCreating">Create Webhook</span>
+                        <span x-show="isCreating">Creating...</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 3: Connect Instructions -->
+            <div x-show="step === 3">
+                <div class="modal-body success-body">
+                    <div class="success-animation">
+                        <div class="success-icon">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="64" height="64">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                        </div>
+                        <h3>Webhook Created!</h3>
+                        <p class="success-desc">Now add it to your <span x-text="provider.charAt(0).toUpperCase() + provider.slice(1)"></span> repository.</p>
+                    </div>
+
+                    <div class="setup-instructions">
+                        <h4>1. Add Webhook URL</h4>
+                        <p class="text-muted">Go to your repository settings and add this webhook URL:</p>
+                        <div class="code-box">
+                            <code x-text="createdWebhook?.webhook_url"></code>
+                            <button class="btn btn-icon btn-sm" @click="navigator.clipboard.writeText(createdWebhook?.webhook_url); showToast('Copied!', 'success')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <h4>2. Set Secret</h4>
+                        <p class="text-muted">Use this secret to verify webhook payloads:</p>
+                        <div class="code-box" x-data="{ showSecret: false }">
+                            <code x-show="!showSecret">••••••••••••••••••••</code>
+                            <code x-show="showSecret" x-cloak x-text="createdWebhook?.secret"></code>
+                            <button class="btn btn-icon btn-sm" @click="showSecret = !showSecret">
+                                <svg x-show="!showSecret" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                                </svg>
+                                <svg x-show="showSecret" x-cloak fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                                </svg>
+                            </button>
+                            <button class="btn btn-icon btn-sm" @click="navigator.clipboard.writeText(createdWebhook?.secret); showToast('Copied!', 'success')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <h4>3. Select Events</h4>
+                        <p class="text-muted">Enable "Push events" in your webhook settings.</p>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" @click="showModal = null; reset(); location.reload()">Done</button>
                 </div>
             </div>
         </div>
@@ -3962,6 +4456,337 @@ body {
 
 .dropdown-item-danger:hover {
     background: rgba(239, 68, 68, 0.1);
+}
+
+/* Webhooks */
+.webhook-config-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.config-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.config-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-weight: 500;
+}
+
+.config-value {
+    font-size: 0.875rem;
+    color: var(--text-primary);
+}
+
+.config-value code {
+    background: var(--bg-tertiary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.8125rem;
+}
+
+.provider-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    text-transform: capitalize;
+}
+
+.provider-badge svg {
+    opacity: 0.8;
+}
+
+.webhook-url-section,
+.webhook-secret-section {
+    margin-bottom: 1.5rem;
+}
+
+.webhook-url-section h4,
+.webhook-secret-section h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin: 0 0 0.25rem 0;
+}
+
+.webhook-url-box,
+.webhook-secret-box {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--bg-secondary);
+    padding: 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+}
+
+.webhook-url-box code,
+.webhook-secret-box code {
+    flex: 1;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    word-break: break-all;
+}
+
+.secret-actions {
+    display: flex;
+    gap: 0.25rem;
+}
+
+/* Badge Preview */
+.badge-preview-section {
+    display: flex;
+    gap: 2rem;
+    align-items: flex-start;
+}
+
+.badge-preview {
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.badge-preview img {
+    max-height: 24px;
+}
+
+.badge-code {
+    flex: 1;
+}
+
+.badge-code h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin: 0 0 0.375rem 0;
+    text-transform: uppercase;
+}
+
+.badge-code h4:not(:first-child) {
+    margin-top: 1rem;
+}
+
+.code-box {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--bg-secondary);
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--border-color);
+}
+
+.code-box code {
+    flex: 1;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    word-break: break-all;
+    color: var(--text-muted);
+}
+
+/* Webhook Events */
+.webhook-events-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.webhook-event-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.webhook-event-item:last-child {
+    border-bottom: none;
+}
+
+.event-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--bg-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.event-icon.deployed {
+    background: rgba(34, 197, 94, 0.1);
+    color: var(--success);
+}
+
+.event-details {
+    flex: 1;
+    min-width: 0;
+}
+
+.event-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.25rem;
+}
+
+.event-type {
+    font-weight: 600;
+    text-transform: capitalize;
+}
+
+.event-branch {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-secondary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.event-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin-bottom: 0.375rem;
+}
+
+.event-commit code {
+    font-size: 0.75rem;
+    background: var(--bg-secondary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.event-message {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.event-footer {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.event-status {
+    flex-shrink: 0;
+}
+
+/* Provider Cards */
+.provider-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.provider-card {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: center;
+}
+
+.provider-card input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.provider-card:hover {
+    border-color: var(--primary);
+}
+
+.provider-card.selected {
+    border-color: var(--primary);
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.provider-card-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.provider-card-content svg {
+    opacity: 0.8;
+}
+
+.provider-name {
+    font-weight: 600;
+    font-size: 1rem;
+}
+
+/* Setup Instructions */
+.setup-instructions {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1.25rem;
+}
+
+.setup-instructions h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin: 0 0 0.25rem 0;
+}
+
+.setup-instructions h4:not(:first-child) {
+    margin-top: 1.25rem;
+}
+
+.setup-instructions .code-box {
+    margin-top: 0.5rem;
+}
+
+/* Loading State */
+.loading-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem;
+    color: var(--text-muted);
+}
+
+.loading-state .spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border-color);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 1rem;
+}
+
+/* Header Actions */
+.header-actions {
+    display: flex;
+    gap: 0.5rem;
 }
 
 /* Deployments List */
