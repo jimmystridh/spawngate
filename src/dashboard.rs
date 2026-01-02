@@ -668,37 +668,129 @@ pub fn render_config_vars(config: &serde_json::Value) -> String {
 /// Generate HTML for domains list
 pub fn render_domains_list(domains: &[serde_json::Value]) -> String {
     if domains.is_empty() {
-        return r##"<div class="empty-state small">No custom domains configured</div>"##.to_string();
+        return r##"<div class="empty-state small">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+            </svg>
+            <h3>No Custom Domains</h3>
+            <p>Add a custom domain to serve your app on your own domain</p>
+        </div>"##.to_string();
     }
 
     let items: Vec<String> = domains.iter().map(|domain| {
         let hostname = domain["hostname"].as_str().unwrap_or("unknown");
+        let app_name = domain["app_name"].as_str().unwrap_or("");
         let verified = domain["dns_verified"].as_bool().unwrap_or(false);
+        let ssl_enabled = domain["ssl_enabled"].as_bool().unwrap_or(false);
         let ssl_status = domain["ssl_status"].as_str().unwrap_or("pending");
+        let verification_token = domain["verification_token"].as_str().unwrap_or("");
+        let cert_expires = domain["cert_expires_at"].as_str().unwrap_or("");
 
-        let status_class = if verified { "status-running" } else { "status-idle" };
-        let status_text = if verified { "Verified" } else { "Pending" };
+        // DNS status badge
+        let (dns_class, dns_text, dns_icon) = if verified {
+            ("status-running", "DNS Verified", r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##)
+        } else {
+            ("status-warning", "Pending Verification", r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##)
+        };
+
+        // SSL status badge
+        let (ssl_class, ssl_text, ssl_icon) = match ssl_status {
+            "active" => ("ssl-active", "SSL Active", r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>"##),
+            "expiring" => ("ssl-warning", "SSL Expiring Soon", r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>"##),
+            "expired" => ("ssl-danger", "SSL Expired", r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##),
+            _ => ("ssl-pending", "SSL Pending", r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"/></svg>"##),
+        };
+
+        // Verification helper (only show if not verified)
+        let verification_helper = if !verified && !verification_token.is_empty() {
+            format!(
+                r##"<div class="verification-helper" x-data="{{ showDetails: false }}">
+                <button class="btn btn-sm btn-secondary" @click="showDetails = !showDetails">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    DNS Setup
+                </button>
+                <div x-show="showDetails" x-cloak class="verification-details">
+                    <h4>Add this TXT record to your DNS:</h4>
+                    <div class="dns-record">
+                        <div class="dns-row">
+                            <span class="dns-label">Type:</span>
+                            <span class="dns-value">TXT</span>
+                        </div>
+                        <div class="dns-row">
+                            <span class="dns-label">Name:</span>
+                            <span class="dns-value">_spawngate-verify.{0}</span>
+                            <button class="btn btn-icon btn-xs" onclick="copyToClipboard('_spawngate-verify.{0}')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                            </button>
+                        </div>
+                        <div class="dns-row">
+                            <span class="dns-label">Value:</span>
+                            <span class="dns-value code">{1}</span>
+                            <button class="btn btn-icon btn-xs" onclick="copyToClipboard('{1}')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <p class="dns-note">After adding the record, click "Verify" to check.</p>
+                    <button class="btn btn-primary btn-sm"
+                        hx-post="/apps/{2}/domains/{0}/verify"
+                        hx-swap="none"
+                        hx-on::after-request="showToast('Verification started', 'success'); setTimeout(() => htmx.trigger('#domains-list', 'reload'), 2000)">
+                        Verify Now
+                    </button>
+                </div>
+            </div>"##,
+                hostname, verification_token, app_name
+            )
+        } else {
+            String::new()
+        };
+
+        // SSL expiry info
+        let ssl_expiry = if ssl_enabled && !cert_expires.is_empty() {
+            format!(
+                r##"<span class="ssl-expiry" title="Expires: {0}">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    Auto-renews
+                </span>"##,
+                cert_expires
+            )
+        } else {
+            String::new()
+        };
 
         format!(
             r##"<div class="domain-item">
-            <div class="domain-info">
-                <span class="domain-name">{0}</span>
-                <div class="domain-badges">
-                    <span class="status-badge {1}">{2}</span>
-                    <span class="ssl-badge">SSL: {3}</span>
+            <div class="domain-main">
+                <div class="domain-header">
+                    <span class="domain-name">{0}</span>
+                    <div class="domain-badges">
+                        <span class="domain-badge {1}" title="{2}">{3} {2}</span>
+                        <span class="domain-badge {4}" title="{5}">{6} {5}</span>
+                        {7}
+                    </div>
                 </div>
+                {8}
             </div>
-            <button class="btn btn-icon btn-danger"
-                hx-delete="/apps/current/domains/{0}"
-                hx-confirm="Remove {0}?"
-                hx-swap="none"
-                hx-on::after-request="htmx.trigger('#domains-list', 'reload')">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                </svg>
-            </button>
+            <div class="domain-actions">
+                <button class="btn btn-icon btn-sm btn-danger" title="Remove domain"
+                    hx-delete="/apps/{9}/domains/{0}"
+                    hx-confirm="Remove domain {0}? This cannot be undone."
+                    hx-swap="none"
+                    hx-on::after-request="showToast('Domain removed', 'success'); htmx.trigger('#domains-list', 'reload')">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                    </svg>
+                </button>
+            </div>
         </div>"##,
-            hostname, status_class, status_text, ssl_status
+            hostname, dns_class, dns_text, dns_icon,
+            ssl_class, ssl_text, ssl_icon, ssl_expiry,
+            verification_helper, app_name
         )
     }).collect();
 
@@ -1575,25 +1667,155 @@ git push spawngate main
     <!-- Add Domain Modal -->
     <div class="modal-backdrop" x-show="showModal === 'add-domain'" x-cloak
         @click.self="showModal = null" @keydown.escape.window="showModal = null">
-        <div class="modal" @click.stop>
+        <div class="modal modal-lg" @click.stop x-data="{ domainStep: 1, domainName: '', domainAdded: false, verificationToken: '' }">
             <div class="modal-header">
                 <h2>Add Custom Domain</h2>
-                <button class="close-btn" @click="showModal = null">&times;</button>
+                <button class="close-btn" @click="showModal = null; domainStep = 1; domainName = ''; domainAdded = false">&times;</button>
             </div>
-            <form :hx-post="'/apps/' + currentApp + '/domains'" hx-swap="none" @htmx:after-request="handleDomainAdded($event)">
+
+            <!-- Step Indicator -->
+            <div class="wizard-steps">
+                <div class="wizard-step" :class="{ 'active': domainStep === 1, 'completed': domainStep > 1 }">
+                    <span class="step-number">1</span>
+                    <span class="step-label">Enter Domain</span>
+                </div>
+                <div class="wizard-step" :class="{ 'active': domainStep === 2, 'completed': domainStep > 2 }">
+                    <span class="step-number">2</span>
+                    <span class="step-label">Configure DNS</span>
+                </div>
+                <div class="wizard-step" :class="{ 'active': domainStep === 3 }">
+                    <span class="step-number">3</span>
+                    <span class="step-label">Verify</span>
+                </div>
+            </div>
+
+            <!-- Step 1: Enter Domain -->
+            <div x-show="domainStep === 1">
                 <div class="modal-body">
                     <div class="form-group">
-                        <label for="domain-name">Domain Name</label>
-                        <input type="text" id="domain-name" name="domain" required
-                            placeholder="app.example.com" class="input">
-                        <small>You'll need to configure DNS after adding the domain</small>
+                        <label for="domain-input">Domain Name</label>
+                        <input type="text" id="domain-input" x-model="domainName" required
+                            placeholder="app.example.com" class="input"
+                            pattern="^[a-zA-Z0-9][a-zA-Z0-9-]*(\.[a-zA-Z0-9-]+)+$">
+                        <small>Enter your custom domain (e.g., app.example.com or example.com)</small>
+                    </div>
+                    <div class="domain-preview" x-show="domainName">
+                        <div class="preview-label">Your app will be available at:</div>
+                        <div class="preview-url">https://<span x-text="domainName"></span></div>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" @click="showModal = null">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Add Domain</button>
+                    <button type="button" class="btn btn-primary" @click="if(domainName) domainStep = 2" :disabled="!domainName">
+                        Next
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                        </svg>
+                    </button>
                 </div>
-            </form>
+            </div>
+
+            <!-- Step 2: Configure DNS -->
+            <div x-show="domainStep === 2">
+                <div class="modal-body">
+                    <div class="dns-instructions">
+                        <h3>Configure your DNS</h3>
+                        <p>Add the following records to your DNS provider:</p>
+
+                        <div class="dns-record-card">
+                            <h4>CNAME Record (for subdomains like www.example.com)</h4>
+                            <div class="dns-table">
+                                <div class="dns-table-row">
+                                    <span class="dns-table-label">Type</span>
+                                    <span class="dns-table-value">CNAME</span>
+                                </div>
+                                <div class="dns-table-row">
+                                    <span class="dns-table-label">Name</span>
+                                    <span class="dns-table-value" x-text="domainName.split('.')[0]">@</span>
+                                    <button class="btn btn-icon btn-xs" @click="copyToClipboard(domainName.split('.')[0])">
+                                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                                    </button>
+                                </div>
+                                <div class="dns-table-row">
+                                    <span class="dns-table-label">Target</span>
+                                    <span class="dns-table-value" x-text="currentApp + '.spawngate.app'">app.spawngate.app</span>
+                                    <button class="btn btn-icon btn-xs" @click="copyToClipboard(currentApp + '.spawngate.app')">
+                                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="dns-record-card">
+                            <h4>A Record (for apex domains like example.com)</h4>
+                            <div class="dns-table">
+                                <div class="dns-table-row">
+                                    <span class="dns-table-label">Type</span>
+                                    <span class="dns-table-value">A</span>
+                                </div>
+                                <div class="dns-table-row">
+                                    <span class="dns-table-label">Name</span>
+                                    <span class="dns-table-value">@</span>
+                                </div>
+                                <div class="dns-table-row">
+                                    <span class="dns-table-label">Target</span>
+                                    <span class="dns-table-value">Your server IP</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="dns-note-box">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                            <p>DNS changes can take up to 48 hours to propagate. You can proceed to add the domain and verify later.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @click="domainStep = 1">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+                        </svg>
+                        Back
+                    </button>
+                    <button type="button" class="btn btn-primary"
+                        hx-post :hx-vals="JSON.stringify({domain: domainName})"
+                        :hx-post="'/apps/' + currentApp + '/domains'"
+                        hx-swap="none"
+                        @htmx:after-request="if($event.detail.successful) { domainStep = 3; domainAdded = true; htmx.trigger('#domains-list', 'reload'); } else { showToast('Failed to add domain', 'error'); }">
+                        Add Domain
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 3: Verify -->
+            <div x-show="domainStep === 3">
+                <div class="modal-body">
+                    <div class="success-message">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <h3>Domain Added!</h3>
+                        <p><strong x-text="domainName"></strong> has been added to your app.</p>
+                    </div>
+
+                    <div class="next-steps">
+                        <h4>Next Steps:</h4>
+                        <ol>
+                            <li>Configure your DNS records as shown in the previous step</li>
+                            <li>Wait for DNS propagation (usually 5-30 minutes, up to 48 hours)</li>
+                            <li>Click "Verify" in the domains list to confirm ownership</li>
+                            <li>SSL certificate will be automatically provisioned after verification</li>
+                        </ol>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" @click="showModal = null; domainStep = 1; domainName = ''; domainAdded = false">
+                        Done
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -2431,33 +2653,162 @@ body {
 .domain-item {
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    padding: 0.875rem 1rem;
+    align-items: flex-start;
+    padding: 1rem 1.25rem;
     background: var(--bg-secondary);
     border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+    transition: border-color 0.15s ease;
 }
 
-.domain-info {
+.domain-item:hover {
+    border-color: var(--primary);
+}
+
+.domain-main {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.75rem;
+    flex: 1;
+}
+
+.domain-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
 }
 
 .domain-name {
     font-family: 'SF Mono', Monaco, Consolas, monospace;
-    font-size: 0.875rem;
-    font-weight: 500;
+    font-size: 1rem;
+    font-weight: 600;
     color: var(--text-primary);
 }
 
 .domain-badges {
     display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.domain-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.domain-badge.status-running {
+    background: var(--success-light);
+    color: var(--success);
+}
+
+.domain-badge.status-warning {
+    background: var(--warning-light);
+    color: var(--warning);
+}
+
+.domain-badge.ssl-active {
+    background: var(--success-light);
+    color: var(--success);
+}
+
+.domain-badge.ssl-warning {
+    background: var(--warning-light);
+    color: var(--warning);
+}
+
+.domain-badge.ssl-danger {
+    background: var(--danger-light);
+    color: var(--danger);
+}
+
+.domain-badge.ssl-pending {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.ssl-expiry {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.domain-actions {
+    display: flex;
     gap: 0.5rem;
 }
 
-.ssl-badge {
+.verification-helper {
+    margin-top: 0.5rem;
+}
+
+.verification-details {
+    margin-top: 0.75rem;
+    padding: 1rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+}
+
+.verification-details h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: var(--text-primary);
+}
+
+.dns-record {
+    background: var(--bg-tertiary);
+    border-radius: 0.375rem;
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.dns-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+}
+
+.dns-label {
     font-size: 0.75rem;
     color: var(--text-muted);
+    min-width: 50px;
+}
+
+.dns-value {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    color: var(--text-primary);
+    word-break: break-all;
+}
+
+.dns-value.code {
+    background: var(--bg-secondary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.dns-note {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+}
+
+.btn-xs {
+    padding: 0.25rem;
+}
+
+[x-cloak] {
+    display: none !important;
 }
 
 /* Addons List */
@@ -2931,6 +3282,199 @@ body {
 
 .modal-lg {
     max-width: 600px;
+}
+
+/* Wizard Steps */
+.wizard-steps {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.wizard-step {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-muted);
+}
+
+.wizard-step.active {
+    color: var(--primary);
+}
+
+.wizard-step.completed {
+    color: var(--success);
+}
+
+.step-number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.wizard-step.active .step-number {
+    background: var(--primary);
+    color: white;
+}
+
+.wizard-step.completed .step-number {
+    background: var(--success);
+    color: white;
+}
+
+.step-label {
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+/* Domain Wizard Styles */
+.domain-preview {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: var(--bg-tertiary);
+    border-radius: 0.5rem;
+    text-align: center;
+}
+
+.preview-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+}
+
+.preview-url {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 1rem;
+    color: var(--primary);
+    font-weight: 500;
+}
+
+.dns-instructions h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.dns-instructions > p {
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+}
+
+.dns-record-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.dns-record-card h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: var(--text-primary);
+}
+
+.dns-table {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.dns-table-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.dns-table-label {
+    min-width: 60px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.dns-table-value {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    background: var(--bg-tertiary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    color: var(--text-primary);
+}
+
+.dns-note-box {
+    display: flex;
+    gap: 0.75rem;
+    padding: 1rem;
+    background: var(--primary-light);
+    border-radius: 0.5rem;
+    color: var(--primary);
+}
+
+.dns-note-box svg {
+    flex-shrink: 0;
+}
+
+.dns-note-box p {
+    font-size: 0.875rem;
+    margin: 0;
+}
+
+.success-message {
+    text-align: center;
+    padding: 1.5rem 0;
+}
+
+.success-message svg {
+    color: var(--success);
+    margin-bottom: 1rem;
+}
+
+.success-message h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.success-message p {
+    color: var(--text-secondary);
+}
+
+.next-steps {
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    padding: 1.25rem;
+    margin-top: 1.5rem;
+}
+
+.next-steps h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+}
+
+.next-steps ol {
+    margin: 0;
+    padding-left: 1.25rem;
+}
+
+.next-steps li {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+
+.next-steps li:last-child {
+    margin-bottom: 0;
 }
 
 @keyframes modalIn {
@@ -4668,7 +5212,7 @@ mod tests {
     fn test_render_domains_list_empty() {
         let domains: Vec<serde_json::Value> = vec![];
         let html = render_domains_list(&domains);
-        assert!(html.contains("No custom domains configured"));
+        assert!(html.contains("No Custom Domains"));
     }
 
     #[test]
@@ -4682,8 +5226,8 @@ mod tests {
         ];
         let html = render_domains_list(&domains);
         assert!(html.contains("app.example.com"));
-        assert!(html.contains("Verified"));
-        assert!(html.contains("SSL: active"));
+        assert!(html.contains("DNS Verified"));
+        assert!(html.contains("SSL Active"));
     }
 
     #[test]

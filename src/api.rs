@@ -2437,10 +2437,39 @@ impl PlatformApi {
                 match self.db.get_app_domains(app_name) {
                     Ok(domains) => {
                         let domains_json: Vec<serde_json::Value> = domains.iter().map(|d| {
+                            // Determine SSL status
+                            let ssl_status = if d.ssl_enabled {
+                                if let Some(ref expires) = d.cert_expires_at {
+                                    // Check if cert is expiring soon (within 30 days)
+                                    if let Ok(exp_date) = chrono::DateTime::parse_from_rfc3339(expires) {
+                                        let now = chrono::Utc::now();
+                                        let days_until = (exp_date.timestamp() - now.timestamp()) / 86400;
+                                        if days_until < 0 {
+                                            "expired"
+                                        } else if days_until < 30 {
+                                            "expiring"
+                                        } else {
+                                            "active"
+                                        }
+                                    } else {
+                                        "active"
+                                    }
+                                } else {
+                                    "active"
+                                }
+                            } else {
+                                "pending"
+                            };
+
                             serde_json::json!({
                                 "hostname": d.domain,
+                                "app_name": app_name,
                                 "dns_verified": d.verified,
-                                "ssl_status": if d.ssl_enabled { "active" } else { "pending" },
+                                "ssl_enabled": d.ssl_enabled,
+                                "ssl_status": ssl_status,
+                                "verification_token": d.verification_token,
+                                "cert_expires_at": d.cert_expires_at,
+                                "created_at": d.created_at,
                             })
                         }).collect();
                         let html = dashboard::render_domains_list(&domains_json);

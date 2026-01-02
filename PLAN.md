@@ -99,12 +99,12 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Resource usage graphs (CPU, memory)
 - [ ] Formation editor
 
-### Phase 5: Domains & SSL
-- [ ] Domain list with status badges
-- [ ] Add domain wizard
-- [ ] DNS verification helper
-- [ ] SSL certificate status
-- [ ] Auto-renew indicators
+### Phase 5: Domains & SSL ✅
+- [x] Domain list with status badges
+- [x] Add domain wizard
+- [x] DNS verification helper
+- [x] SSL certificate status
+- [x] Auto-renew indicators
 
 ### Phase 6: Add-ons & Services
 - [ ] Add-on marketplace view
