@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -107,6 +107,10 @@ impl Database {
 
             if current_version < 6 {
                 self.migrate_v6(&conn)?;
+            }
+
+            if current_version < 7 {
+                self.migrate_v7(&conn)?;
             }
         }
 
@@ -391,6 +395,49 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (6);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v7: Metrics history
+    fn migrate_v7(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v7: metrics history");
+
+        conn.execute_batch(r#"
+            -- Request metrics (aggregated per minute)
+            CREATE TABLE IF NOT EXISTS request_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_name TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                avg_response_time_ms REAL NOT NULL DEFAULT 0,
+                p50_response_time_ms REAL,
+                p95_response_time_ms REAL,
+                p99_response_time_ms REAL,
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Resource metrics (CPU, memory per instance)
+            CREATE TABLE IF NOT EXISTS resource_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_name TEXT NOT NULL,
+                instance_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                cpu_percent REAL NOT NULL DEFAULT 0,
+                memory_used INTEGER NOT NULL DEFAULT 0,
+                memory_limit INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (app_name) REFERENCES apps(name) ON DELETE CASCADE
+            );
+
+            -- Indices for efficient time-series queries
+            CREATE INDEX IF NOT EXISTS idx_request_metrics_app_time ON request_metrics(app_name, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_resource_metrics_app_time ON resource_metrics(app_name, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_resource_metrics_instance ON resource_metrics(instance_id, timestamp);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (7);
         "#)?;
 
         Ok(())
@@ -1454,6 +1501,129 @@ impl Database {
 
         Ok(logs)
     }
+
+    // ==================== Metrics Operations ====================
+
+    /// Record request metrics
+    pub fn record_request_metrics(&self, metrics: &RequestMetricsRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO request_metrics (app_name, timestamp, request_count, error_count, avg_response_time_ms, p50_response_time_ms, p95_response_time_ms, p99_response_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                metrics.app_name, metrics.timestamp, metrics.request_count,
+                metrics.error_count, metrics.avg_response_time_ms,
+                metrics.p50_response_time_ms, metrics.p95_response_time_ms, metrics.p99_response_time_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record resource metrics
+    pub fn record_resource_metrics(&self, metrics: &ResourceMetricsRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO resource_metrics (app_name, instance_id, timestamp, cpu_percent, memory_used, memory_limit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                metrics.app_name, metrics.instance_id, metrics.timestamp,
+                metrics.cpu_percent, metrics.memory_used, metrics.memory_limit
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get request metrics for time range
+    pub fn get_request_metrics(&self, app_name: &str, since: &str, limit: usize) -> Result<Vec<RequestMetricsRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, timestamp, request_count, error_count, avg_response_time_ms, p50_response_time_ms, p95_response_time_ms, p99_response_time_ms
+             FROM request_metrics WHERE app_name = ?1 AND timestamp >= ?2 ORDER BY timestamp DESC LIMIT ?3"
+        )?;
+
+        let records = stmt.query_map(params![app_name, since, limit as i64], |row| {
+            Ok(RequestMetricsRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                timestamp: row.get(2)?,
+                request_count: row.get(3)?,
+                error_count: row.get(4)?,
+                avg_response_time_ms: row.get(5)?,
+                p50_response_time_ms: row.get(6)?,
+                p95_response_time_ms: row.get(7)?,
+                p99_response_time_ms: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Get resource metrics for time range
+    pub fn get_resource_metrics(&self, app_name: &str, since: &str, limit: usize) -> Result<Vec<ResourceMetricsRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, instance_id, timestamp, cpu_percent, memory_used, memory_limit
+             FROM resource_metrics WHERE app_name = ?1 AND timestamp >= ?2 ORDER BY timestamp DESC LIMIT ?3"
+        )?;
+
+        let records = stmt.query_map(params![app_name, since, limit as i64], |row| {
+            Ok(ResourceMetricsRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                instance_id: row.get(2)?,
+                timestamp: row.get(3)?,
+                cpu_percent: row.get(4)?,
+                memory_used: row.get(5)?,
+                memory_limit: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Get resource metrics for a specific instance
+    pub fn get_instance_metrics(&self, instance_id: &str, since: &str, limit: usize) -> Result<Vec<ResourceMetricsRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_name, instance_id, timestamp, cpu_percent, memory_used, memory_limit
+             FROM resource_metrics WHERE instance_id = ?1 AND timestamp >= ?2 ORDER BY timestamp DESC LIMIT ?3"
+        )?;
+
+        let records = stmt.query_map(params![instance_id, since, limit as i64], |row| {
+            Ok(ResourceMetricsRecord {
+                id: row.get(0)?,
+                app_name: row.get(1)?,
+                instance_id: row.get(2)?,
+                timestamp: row.get(3)?,
+                cpu_percent: row.get(4)?,
+                memory_used: row.get(5)?,
+                memory_limit: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Cleanup old metrics (keep last N days)
+    pub fn cleanup_old_metrics(&self, days: i64) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = format!("datetime('now', '-{} days')", days);
+
+        let request_deleted = conn.execute(
+            &format!("DELETE FROM request_metrics WHERE timestamp < {}", cutoff),
+            [],
+        )?;
+
+        let resource_deleted = conn.execute(
+            &format!("DELETE FROM resource_metrics WHERE timestamp < {}", cutoff),
+            [],
+        )?;
+
+        Ok((request_deleted, resource_deleted))
+    }
 }
 
 // ==================== Record Types ====================
@@ -1627,6 +1797,32 @@ pub struct ApiTokenLogRecord {
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub created_at: String,
+}
+
+/// Request metrics record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestMetricsRecord {
+    pub id: i64,
+    pub app_name: String,
+    pub timestamp: String,
+    pub request_count: i64,
+    pub error_count: i64,
+    pub avg_response_time_ms: f64,
+    pub p50_response_time_ms: Option<f64>,
+    pub p95_response_time_ms: Option<f64>,
+    pub p99_response_time_ms: Option<f64>,
+}
+
+/// Resource metrics record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceMetricsRecord {
+    pub id: i64,
+    pub app_name: String,
+    pub instance_id: String,
+    pub timestamp: String,
+    pub cpu_percent: f64,
+    pub memory_used: i64,
+    pub memory_limit: i64,
 }
 
 #[cfg(test)]

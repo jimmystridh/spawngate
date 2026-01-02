@@ -625,6 +625,14 @@ impl PlatformApi {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/metrics")).unwrap_or("");
                 self.get_app_metrics(app_name).await
             }
+            (Method::GET, path) if path.ends_with("/metrics/requests") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/metrics/requests")).unwrap_or("");
+                self.get_request_metrics_history(app_name).await
+            }
+            (Method::GET, path) if path.ends_with("/metrics/resources") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/metrics/resources")).unwrap_or("");
+                self.get_resource_metrics_history(app_name).await
+            }
 
             // Git info
             (Method::GET, path) if path.ends_with("/git") => {
@@ -1299,6 +1307,82 @@ impl PlatformApi {
         };
 
         let response = ApiResponse::ok(metrics);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_request_metrics_history(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Get metrics from last hour (60 data points at 1-minute intervals)
+        let since = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(1))
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+
+        let metrics = self.db.get_request_metrics(app_name, &since, 60)?;
+
+        // Convert to JSON format suitable for charting
+        let data: Vec<serde_json::Value> = metrics.iter().map(|m| {
+            serde_json::json!({
+                "timestamp": m.timestamp,
+                "requests": m.request_count,
+                "errors": m.error_count,
+                "avg_response_ms": m.avg_response_time_ms,
+                "p50_ms": m.p50_response_time_ms,
+                "p95_ms": m.p95_response_time_ms,
+                "p99_ms": m.p99_response_time_ms,
+            })
+        }).collect();
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "app": app_name,
+            "period": "1h",
+            "interval": "1m",
+            "data": data,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_resource_metrics_history(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Get metrics from last hour
+        let since = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(1))
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+
+        let metrics = self.db.get_resource_metrics(app_name, &since, 360)?;
+
+        // Group by instance
+        let mut by_instance: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+        for m in metrics {
+            let entry = by_instance.entry(m.instance_id.clone()).or_default();
+            entry.push(serde_json::json!({
+                "timestamp": m.timestamp,
+                "cpu": m.cpu_percent,
+                "memory_used": m.memory_used,
+                "memory_limit": m.memory_limit,
+                "memory_percent": if m.memory_limit > 0 {
+                    (m.memory_used as f64 / m.memory_limit as f64) * 100.0
+                } else {
+                    0.0
+                },
+            }));
+        }
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "app": app_name,
+            "period": "1h",
+            "interval": "10s",
+            "instances": by_instance,
+        }));
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
 

@@ -127,6 +127,7 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
     <button class="tab" :class="{{ 'active': activeTab === 'deploy' }}" @click="activeTab = 'deploy'">Deploy</button>
     <button class="tab" :class="{{ 'active': activeTab === 'webhooks' }}" @click="activeTab = 'webhooks'">Webhooks</button>
     <button class="tab" :class="{{ 'active': activeTab === 'secrets' }}" @click="activeTab = 'secrets'">Secrets</button>
+    <button class="tab" :class="{{ 'active': activeTab === 'metrics' }}" @click="activeTab = 'metrics'">Metrics</button>
     <button class="tab" :class="{{ 'active': activeTab === 'logs' }}" @click="activeTab = 'logs'">Logs</button>
     <button class="tab" :class="{{ 'active': activeTab === 'settings' }}" @click="activeTab = 'settings'">Settings</button>
 </div>
@@ -1146,6 +1147,327 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
                         </button>
                     </div>
                 </div>
+            </div>
+        </div>
+    </template>
+</div>
+
+<div class="tab-content" x-show="activeTab === 'metrics'" x-data="{{
+    requestMetrics: [],
+    resourceMetrics: {{}},
+    currentMetrics: null,
+    timeRange: '1h',
+    loading: true,
+    refreshInterval: null,
+    async init() {{
+        await this.loadMetrics();
+        this.loading = false;
+        // Auto-refresh every 30 seconds
+        this.refreshInterval = setInterval(() => this.loadMetrics(), 30000);
+    }},
+    async loadMetrics() {{
+        await Promise.all([
+            this.loadCurrentMetrics(),
+            this.loadRequestMetrics(),
+            this.loadResourceMetrics()
+        ]);
+    }},
+    async loadCurrentMetrics() {{
+        try {{
+            const res = await fetch('/apps/{0}/metrics');
+            if (res.ok) {{
+                const data = await res.json();
+                this.currentMetrics = data.data;
+            }}
+        }} catch (e) {{ console.error('Failed to load current metrics:', e); }}
+    }},
+    async loadRequestMetrics() {{
+        try {{
+            const res = await fetch('/apps/{0}/metrics/requests');
+            if (res.ok) {{
+                const data = await res.json();
+                this.requestMetrics = data.data?.data || [];
+            }}
+        }} catch (e) {{ console.error('Failed to load request metrics:', e); }}
+    }},
+    async loadResourceMetrics() {{
+        try {{
+            const res = await fetch('/apps/{0}/metrics/resources');
+            if (res.ok) {{
+                const data = await res.json();
+                this.resourceMetrics = data.data?.instances || {{}};
+            }}
+        }} catch (e) {{ console.error('Failed to load resource metrics:', e); }}
+    }},
+    formatBytes(bytes) {{
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }},
+    formatTime(ts) {{
+        if (!ts) return '';
+        const d = new Date(ts);
+        return d.toLocaleTimeString();
+    }},
+    getSparklinePoints(data, key, width = 120, height = 30) {{
+        if (!data || data.length === 0) return '';
+        const values = data.map(d => d[key] || 0);
+        const max = Math.max(...values, 1);
+        const points = values.map((v, i) => {{
+            const x = (i / (values.length - 1)) * width;
+            const y = height - (v / max) * height;
+            return `${{x}},${{y}}`;
+        }}).join(' ');
+        return points;
+    }},
+    calculateErrorRate() {{
+        if (!this.requestMetrics.length) return 0;
+        const total = this.requestMetrics.reduce((sum, m) => sum + m.requests, 0);
+        const errors = this.requestMetrics.reduce((sum, m) => sum + m.errors, 0);
+        return total > 0 ? ((errors / total) * 100).toFixed(2) : 0;
+    }},
+    calculateAvgResponseTime() {{
+        if (!this.requestMetrics.length) return 0;
+        const sum = this.requestMetrics.reduce((s, m) => s + m.avg_response_ms, 0);
+        return (sum / this.requestMetrics.length).toFixed(1);
+    }},
+    calculateTotalRequests() {{
+        return this.requestMetrics.reduce((sum, m) => sum + m.requests, 0);
+    }}
+}}">
+    <template x-if="loading">
+        <div class="loading-state">
+            <div class="spinner"></div>
+            <span>Loading metrics...</span>
+        </div>
+    </template>
+
+    <template x-if="!loading">
+        <div class="metrics-content">
+            <!-- Current Stats Overview -->
+            <div class="metrics-summary">
+                <div class="metric-card">
+                    <div class="metric-icon cpu-icon">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
+                        </svg>
+                    </div>
+                    <div class="metric-details">
+                        <span class="metric-value" x-text="(currentMetrics?.cpu_percent || 0).toFixed(1) + '%'"></span>
+                        <span class="metric-label">CPU Usage</span>
+                    </div>
+                    <div class="metric-sparkline">
+                        <svg viewBox="0 0 120 30" preserveAspectRatio="none">
+                            <polyline fill="none" stroke="var(--primary)" stroke-width="2" :points="getSparklinePoints(Object.values(resourceMetrics)[0] || [], 'cpu', 120, 30)"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-icon memory-icon">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+                        </svg>
+                    </div>
+                    <div class="metric-details">
+                        <span class="metric-value" x-text="formatBytes(currentMetrics?.memory_used || 0)"></span>
+                        <span class="metric-label">Memory Used</span>
+                    </div>
+                    <div class="metric-sparkline">
+                        <svg viewBox="0 0 120 30" preserveAspectRatio="none">
+                            <polyline fill="none" stroke="var(--success)" stroke-width="2" :points="getSparklinePoints(Object.values(resourceMetrics)[0] || [], 'memory_percent', 120, 30)"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-icon requests-icon">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                        </svg>
+                    </div>
+                    <div class="metric-details">
+                        <span class="metric-value" x-text="calculateTotalRequests().toLocaleString()"></span>
+                        <span class="metric-label">Requests (1h)</span>
+                    </div>
+                    <div class="metric-sparkline">
+                        <svg viewBox="0 0 120 30" preserveAspectRatio="none">
+                            <polyline fill="none" stroke="var(--warning)" stroke-width="2" :points="getSparklinePoints(requestMetrics, 'requests', 120, 30)"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-icon error-icon">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                    </div>
+                    <div class="metric-details">
+                        <span class="metric-value" :class="{{ 'text-danger': parseFloat(calculateErrorRate()) > 5 }}" x-text="calculateErrorRate() + '%'"></span>
+                        <span class="metric-label">Error Rate</span>
+                    </div>
+                    <div class="metric-sparkline">
+                        <svg viewBox="0 0 120 30" preserveAspectRatio="none">
+                            <polyline fill="none" stroke="var(--danger)" stroke-width="2" :points="getSparklinePoints(requestMetrics, 'errors', 120, 30)"/>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Request Metrics Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                        </svg>
+                        Request Rate
+                    </h2>
+                    <button class="btn btn-secondary btn-sm" @click="loadMetrics()">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+
+                <template x-if="requestMetrics.length === 0">
+                    <div class="empty-state small">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                        </svg>
+                        <p>No request data yet</p>
+                        <p class="text-muted">Metrics will appear as your app receives traffic</p>
+                    </div>
+                </template>
+
+                <template x-if="requestMetrics.length > 0">
+                    <div class="chart-container">
+                        <svg class="requests-chart" viewBox="0 0 600 200" preserveAspectRatio="none">
+                            <!-- Grid lines -->
+                            <line x1="0" y1="50" x2="600" y2="50" stroke="var(--border-color)" stroke-dasharray="4"/>
+                            <line x1="0" y1="100" x2="600" y2="100" stroke="var(--border-color)" stroke-dasharray="4"/>
+                            <line x1="0" y1="150" x2="600" y2="150" stroke="var(--border-color)" stroke-dasharray="4"/>
+
+                            <!-- Request rate line -->
+                            <polyline fill="none" stroke="var(--primary)" stroke-width="2" :points="getSparklinePoints(requestMetrics.slice().reverse(), 'requests', 600, 180)"/>
+
+                            <!-- Error rate line (scaled) -->
+                            <polyline fill="none" stroke="var(--danger)" stroke-width="2" stroke-dasharray="4" :points="getSparklinePoints(requestMetrics.slice().reverse(), 'errors', 600, 180)"/>
+                        </svg>
+                        <div class="chart-legend">
+                            <span class="legend-item"><span class="legend-color" style="background: var(--primary)"></span>Requests</span>
+                            <span class="legend-item"><span class="legend-color" style="background: var(--danger)"></span>Errors</span>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Response Time Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        Response Time
+                    </h2>
+                    <div class="response-time-summary">
+                        <span class="rt-stat">Avg: <strong x-text="calculateAvgResponseTime() + 'ms'"></strong></span>
+                    </div>
+                </div>
+
+                <template x-if="requestMetrics.length === 0">
+                    <div class="empty-state small">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <p>No response time data yet</p>
+                    </div>
+                </template>
+
+                <template x-if="requestMetrics.length > 0">
+                    <div class="chart-container">
+                        <svg class="response-chart" viewBox="0 0 600 200" preserveAspectRatio="none">
+                            <!-- Grid lines -->
+                            <line x1="0" y1="50" x2="600" y2="50" stroke="var(--border-color)" stroke-dasharray="4"/>
+                            <line x1="0" y1="100" x2="600" y2="100" stroke="var(--border-color)" stroke-dasharray="4"/>
+                            <line x1="0" y1="150" x2="600" y2="150" stroke="var(--border-color)" stroke-dasharray="4"/>
+
+                            <!-- p50 line -->
+                            <polyline fill="none" stroke="var(--success)" stroke-width="2" :points="getSparklinePoints(requestMetrics.slice().reverse(), 'p50_ms', 600, 180)"/>
+
+                            <!-- p95 line -->
+                            <polyline fill="none" stroke="var(--warning)" stroke-width="2" :points="getSparklinePoints(requestMetrics.slice().reverse(), 'p95_ms', 600, 180)"/>
+
+                            <!-- p99 line -->
+                            <polyline fill="none" stroke="var(--danger)" stroke-width="2" :points="getSparklinePoints(requestMetrics.slice().reverse(), 'p99_ms', 600, 180)"/>
+                        </svg>
+                        <div class="chart-legend">
+                            <span class="legend-item"><span class="legend-color" style="background: var(--success)"></span>p50</span>
+                            <span class="legend-item"><span class="legend-color" style="background: var(--warning)"></span>p95</span>
+                            <span class="legend-item"><span class="legend-color" style="background: var(--danger)"></span>p99</span>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Resource Usage per Instance -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/>
+                        </svg>
+                        Instance Resources
+                    </h2>
+                </div>
+
+                <template x-if="Object.keys(resourceMetrics).length === 0">
+                    <div class="empty-state small">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2"/>
+                        </svg>
+                        <p>No instance data available</p>
+                        <p class="text-muted">Resource usage will appear when instances are running</p>
+                    </div>
+                </template>
+
+                <template x-if="Object.keys(resourceMetrics).length > 0">
+                    <div class="instance-metrics-grid">
+                        <template x-for="(metrics, instanceId) in resourceMetrics" :key="instanceId">
+                            <div class="instance-metric-card">
+                                <div class="instance-header">
+                                    <code class="instance-id" x-text="instanceId.substring(0, 12)"></code>
+                                </div>
+                                <div class="instance-stats">
+                                    <div class="instance-stat">
+                                        <span class="stat-label">CPU</span>
+                                        <div class="stat-bar">
+                                            <div class="stat-bar-fill cpu-bar" :style="'width: ' + (metrics[0]?.cpu || 0) + '%'"></div>
+                                        </div>
+                                        <span class="stat-value" x-text="(metrics[0]?.cpu || 0).toFixed(1) + '%'"></span>
+                                    </div>
+                                    <div class="instance-stat">
+                                        <span class="stat-label">Memory</span>
+                                        <div class="stat-bar">
+                                            <div class="stat-bar-fill memory-bar" :style="'width: ' + (metrics[0]?.memory_percent || 0) + '%'"></div>
+                                        </div>
+                                        <span class="stat-value" x-text="formatBytes(metrics[0]?.memory_used || 0)"></span>
+                                    </div>
+                                </div>
+                                <div class="instance-sparklines">
+                                    <svg viewBox="0 0 100 25" preserveAspectRatio="none">
+                                        <polyline fill="none" stroke="var(--primary)" stroke-width="1.5" :points="getSparklinePoints(metrics.slice().reverse(), 'cpu', 100, 25)"/>
+                                    </svg>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
             </div>
         </div>
     </template>
@@ -5639,6 +5961,208 @@ body {
     margin-top: 1.5rem;
     padding-top: 1.5rem;
     border-top: 1px solid var(--border-color);
+}
+
+/* Metrics Dashboard */
+.metrics-content {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.metrics-summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+}
+
+.metric-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.metric-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.metric-icon.cpu-icon {
+    background: rgba(59, 130, 246, 0.1);
+    color: var(--primary);
+}
+
+.metric-icon.memory-icon {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success);
+}
+
+.metric-icon.requests-icon {
+    background: rgba(234, 179, 8, 0.1);
+    color: var(--warning);
+}
+
+.metric-icon.error-icon {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger);
+}
+
+.metric-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+}
+
+.metric-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.metric-label {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+.metric-sparkline {
+    height: 30px;
+}
+
+.metric-sparkline svg {
+    width: 100%;
+    height: 100%;
+}
+
+.chart-container {
+    padding: 1rem 0;
+}
+
+.chart-container svg {
+    width: 100%;
+    height: 200px;
+}
+
+.chart-legend {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    margin-top: 0.75rem;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+.legend-color {
+    width: 12px;
+    height: 3px;
+    border-radius: 1px;
+}
+
+.response-time-summary {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.rt-stat strong {
+    color: var(--text-primary);
+}
+
+.instance-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.instance-metric-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+.instance-header {
+    margin-bottom: 0.75rem;
+}
+
+.instance-id {
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    background: var(--bg-tertiary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+}
+
+.instance-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.instance-stat {
+    display: grid;
+    grid-template-columns: 60px 1fr 60px;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.stat-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.stat-bar {
+    height: 6px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.stat-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.stat-bar-fill.cpu-bar {
+    background: var(--primary);
+}
+
+.stat-bar-fill.memory-bar {
+    background: var(--success);
+}
+
+.stat-value {
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-align: right;
+}
+
+.instance-sparklines {
+    height: 25px;
+}
+
+.instance-sparklines svg {
+    width: 100%;
+    height: 100%;
+}
+
+.text-danger {
+    color: var(--danger) !important;
 }
 
 /* Header Actions */
