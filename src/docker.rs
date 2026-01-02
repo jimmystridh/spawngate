@@ -15,6 +15,14 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+/// Container resource statistics
+#[derive(Debug, Clone)]
+pub struct ContainerStats {
+    pub cpu_percent: f64,
+    pub memory_used: u64,
+    pub memory_limit: u64,
+}
+
 /// Manages Docker containers for backends
 pub struct DockerManager {
     client: Docker,
@@ -487,6 +495,54 @@ impl DockerManager {
                 .unwrap_or(false),
             Err(_) => false,
         }
+    }
+
+    /// Get container resource stats
+    pub async fn get_container_stats(&self, container_id: &str) -> anyhow::Result<ContainerStats> {
+        use bollard::container::StatsOptions;
+        use futures::TryStreamExt;
+
+        let options = StatsOptions {
+            stream: false,
+            one_shot: true,
+        };
+
+        let stats = self.client
+            .stats(container_id, Some(options))
+            .try_next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No stats available"))?;
+
+        // Calculate CPU percentage
+        let cpu_stats = &stats.cpu_stats;
+        let precpu_stats = &stats.precpu_stats;
+
+        let cpu_percent = {
+            let cpu_delta = cpu_stats.cpu_usage.total_usage.saturating_sub(
+                precpu_stats.cpu_usage.total_usage
+            );
+            let system_delta = cpu_stats.system_cpu_usage.unwrap_or(0).saturating_sub(
+                precpu_stats.system_cpu_usage.unwrap_or(0)
+            );
+            let num_cpus = cpu_stats.online_cpus.unwrap_or(1) as f64;
+
+            if system_delta > 0 && cpu_delta > 0 {
+                (cpu_delta as f64 / system_delta as f64) * num_cpus * 100.0
+            } else {
+                0.0
+            }
+        };
+
+        // Get memory stats
+        let mem_stats = &stats.memory_stats;
+        let memory_used = mem_stats.usage.unwrap_or(0);
+        let memory_limit = mem_stats.limit.unwrap_or(0);
+
+        Ok(ContainerStats {
+            cpu_percent,
+            memory_used,
+            memory_limit,
+        })
     }
 
     /// Stream container logs and forward them to tracing

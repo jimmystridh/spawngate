@@ -92,11 +92,11 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Log search and filtering (by source, level, and text search)
 - [x] Log download (export filtered logs as text file)
 
-### Phase 4: Scaling & Processes
-- [ ] Visual instance manager (slider/input)
-- [ ] Process type cards (web, worker, etc.)
-- [ ] Restart/stop individual instances
-- [ ] Resource usage graphs (CPU, memory)
+### Phase 4: Scaling & Processes ✅
+- [x] Visual instance manager (slider/input)
+- [x] Process type cards (web, worker, etc.)
+- [x] Restart/stop individual instances
+- [x] Resource usage graphs (CPU, memory)
 - [ ] Formation editor
 
 ### Phase 5: Domains & SSL

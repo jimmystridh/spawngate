@@ -581,6 +581,33 @@ impl PlatformApi {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/processes")).unwrap_or("");
                 self.list_processes(app_name).await
             }
+
+            // Individual instance restart
+            (Method::POST, path) if path.contains("/instances/") && path.ends_with("/restart") => {
+                let path_trimmed = path.strip_suffix("/restart").unwrap_or("");
+                let parts: Vec<&str> = path_trimmed.split('/').collect();
+                if parts.len() >= 5 {
+                    let app_name = parts[2];
+                    let instance_id = parts[4];
+                    self.restart_instance(app_name, instance_id).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
+            }
+
+            // Individual instance stop
+            (Method::POST, path) if path.contains("/instances/") && path.ends_with("/stop") => {
+                let path_trimmed = path.strip_suffix("/stop").unwrap_or("");
+                let parts: Vec<&str> = path_trimmed.split('/').collect();
+                if parts.len() >= 5 {
+                    let app_name = parts[2];
+                    let instance_id = parts[4];
+                    self.stop_instance(app_name, instance_id).await
+                } else {
+                    Ok(json_error(StatusCode::BAD_REQUEST, "Invalid path"))
+                }
+            }
+
             // Restart (rolling deploy)
             (Method::POST, path) if path.ends_with("/restart") => {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/restart")).unwrap_or("");
@@ -591,6 +618,12 @@ impl PlatformApi {
             (Method::GET, path) if path.ends_with("/logs") => {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/logs")).unwrap_or("");
                 self.get_logs(app_name).await
+            }
+
+            // Metrics
+            (Method::GET, path) if path.ends_with("/metrics") => {
+                let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/metrics")).unwrap_or("");
+                self.get_app_metrics(app_name).await
             }
 
             // Git info
@@ -1201,6 +1234,66 @@ impl PlatformApi {
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
     }
 
+    // ==================== Metrics ====================
+
+    async fn get_app_metrics(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        // Get running processes for this app
+        let processes = self.db.get_app_processes(app_name)?;
+        let running_containers: Vec<_> = processes
+            .iter()
+            .filter(|p| p.status == "running" && p.container_id.is_some())
+            .collect();
+
+        let mut total_cpu: f64 = 0.0;
+        let mut total_memory_used: u64 = 0;
+        let mut total_memory_limit: u64 = 0;
+        let mut container_count = 0;
+
+        for proc in &running_containers {
+            if let Some(ref container_id) = proc.container_id {
+                if let Ok(stats) = self.instance_manager.get_container_stats(container_id).await {
+                    total_cpu += stats.cpu_percent;
+                    total_memory_used += stats.memory_used;
+                    total_memory_limit += stats.memory_limit;
+                    container_count += 1;
+                }
+            }
+        }
+
+        let metrics = if container_count > 0 {
+            let memory_percent = if total_memory_limit > 0 {
+                (total_memory_used as f64 / total_memory_limit as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            serde_json::json!({
+                "cpu_percent": total_cpu,
+                "memory_percent": memory_percent,
+                "memory_used": total_memory_used,
+                "memory_limit": total_memory_limit,
+                "cpu_cores": container_count,
+                "instance_count": running_containers.len(),
+            })
+        } else {
+            serde_json::json!({
+                "cpu_percent": 0,
+                "memory_percent": 0,
+                "memory_used": 0,
+                "memory_limit": 0,
+                "cpu_cores": 0,
+                "instance_count": 0,
+            })
+        };
+
+        let response = ApiResponse::ok(metrics);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
     // ==================== Git Info ====================
 
     async fn get_git_info(&self, app_name: &str) -> Result<Response<Full<Bytes>>> {
@@ -1310,6 +1403,58 @@ impl PlatformApi {
                 Ok(json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Rolling restart failed: {}", e),
+                ))
+            }
+        }
+    }
+
+    async fn restart_instance(&self, app_name: &str, instance_id: &str) -> Result<Response<Full<Bytes>>> {
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        info!(app = %app_name, instance = %instance_id, "Restarting individual instance");
+
+        match self.instance_manager.restart_instance(app_name, instance_id).await {
+            Ok(_) => {
+                let response = ApiResponse::ok(serde_json::json!({
+                    "app": app_name,
+                    "instance": instance_id,
+                    "status": "restarting"
+                }));
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            Err(e) => {
+                error!(app = %app_name, instance = %instance_id, error = %e, "Instance restart failed");
+                Ok(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Instance restart failed: {}", e),
+                ))
+            }
+        }
+    }
+
+    async fn stop_instance(&self, app_name: &str, instance_id: &str) -> Result<Response<Full<Bytes>>> {
+        if self.db.get_app(app_name)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "App not found"));
+        }
+
+        info!(app = %app_name, instance = %instance_id, "Stopping individual instance");
+
+        match self.instance_manager.stop_instance(instance_id).await {
+            Ok(_) => {
+                let response = ApiResponse::ok(serde_json::json!({
+                    "app": app_name,
+                    "instance": instance_id,
+                    "status": "stopped"
+                }));
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            Err(e) => {
+                error!(app = %app_name, instance = %instance_id, error = %e, "Instance stop failed");
+                Ok(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Instance stop failed: {}", e),
                 ))
             }
         }
@@ -2343,8 +2488,10 @@ impl PlatformApi {
                     Ok(deploys) => {
                         let deploys_json: Vec<serde_json::Value> = deploys.iter().map(|d| {
                             serde_json::json!({
+                                "id": d.id,
                                 "status": d.status,
                                 "image": d.image,
+                                "commit_hash": d.commit_hash,
                                 "duration_secs": d.duration_secs,
                                 "created_at": d.created_at,
                             })
@@ -2356,6 +2503,43 @@ impl PlatformApi {
                         error!(error = %e, "Failed to get deployments");
                         html_response(StatusCode::INTERNAL_SERVER_ERROR,
                             r##"<div class="error">Failed to load deployments</div>"##)
+                    }
+                }
+            }
+
+            // Get instances (HTMX partial)
+            (&Method::GET, p) if p.ends_with("/instances") => {
+                let app_name = p.strip_prefix("/dashboard/apps/")
+                    .and_then(|p| p.strip_suffix("/instances"))
+                    .unwrap_or("");
+
+                // Get app info for scale settings
+                let app = self.db.get_app(app_name).ok().flatten();
+                let (scale, min_scale, max_scale) = app.as_ref()
+                    .map(|a| (a.scale as i64, a.min_scale as i64, a.max_scale as i64))
+                    .unwrap_or((1, 0, 10));
+
+                match self.db.get_app_processes(app_name) {
+                    Ok(processes) => {
+                        let instances_json: Vec<serde_json::Value> = processes.iter()
+                            .filter(|p| p.status != "stopped")
+                            .map(|p| {
+                                serde_json::json!({
+                                    "id": p.id,
+                                    "process_type": p.process_type,
+                                    "status": p.status,
+                                    "health_status": p.health_status,
+                                    "port": p.port,
+                                    "started_at": p.started_at,
+                                })
+                            }).collect();
+                        let html = dashboard::render_instances_list(app_name, &instances_json, scale, min_scale, max_scale);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get instances");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load instances</div>"##)
                     }
                 }
             }

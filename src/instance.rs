@@ -131,6 +131,11 @@ impl InstanceManager {
         &self.load_balancer
     }
 
+    /// Get container stats for a specific container
+    pub async fn get_container_stats(&self, container_id: &str) -> Result<crate::docker::ContainerStats> {
+        self.docker.get_container_stats(container_id).await
+    }
+
     /// Scale an app to the specified number of instances
     pub async fn scale(&self, app_name: &str, process_type: &str, target_count: i32) -> Result<()> {
         let app = self.db.get_app(app_name)?
@@ -382,6 +387,40 @@ impl InstanceManager {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    /// Restart a single instance (stop then start with same image)
+    pub async fn restart_instance(&self, app_name: &str, instance_id: &str) -> Result<()> {
+        let app = self.db.get_app(app_name)?
+            .ok_or_else(|| anyhow::anyhow!("App not found: {}", app_name))?;
+
+        let image = app.image.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("App has no image"))?;
+
+        let processes = self.db.get_app_processes(app_name)?;
+        let proc = processes.iter()
+            .find(|p| p.id == instance_id)
+            .ok_or_else(|| anyhow::anyhow!("Instance not found: {}", instance_id))?;
+
+        let process_type = proc.process_type.clone();
+        let app_port = app.port as u16;
+
+        info!(app = %app_name, instance = %instance_id, "Restarting instance");
+
+        // Stop the old instance
+        self.stop_instance(instance_id).await?;
+
+        // Spawn a new instance to replace it
+        let new_instance = self.spawn_instance(app_name, image, &process_type, app_port).await?;
+
+        info!(
+            app = %app_name,
+            old_instance = %instance_id,
+            new_instance = %new_instance.id,
+            "Instance restarted successfully"
+        );
 
         Ok(())
     }

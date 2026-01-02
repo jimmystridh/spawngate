@@ -168,7 +168,7 @@ pub fn render_app_detail(app: &serde_json::Value) -> String {
 <div class="tab-content" x-show="activeTab === 'resources'">
     <div class="card">
         <h2>Instances</h2>
-        <div id="instances-list" hx-get="/dashboard/apps/{0}/dynos" hx-trigger="load" hx-swap="innerHTML">
+        <div id="instances-list" hx-get="/dashboard/apps/{0}/instances" hx-trigger="load" hx-swap="innerHTML">
             <div class="loading">Loading instances...</div>
         </div>
     </div>
@@ -849,6 +849,245 @@ pub fn render_deployments_list(deployments: &[serde_json::Value]) -> String {
     }).collect();
 
     format!(r##"<div class="deployments-list">{}</div>"##, items.join(""))
+}
+
+/// Generate HTML for instances list with scaling controls
+pub fn render_instances_list(
+    app_name: &str,
+    instances: &[serde_json::Value],
+    scale: i64,
+    min_scale: i64,
+    max_scale: i64,
+) -> String {
+    // Group instances by process type
+    let mut web_instances: Vec<&serde_json::Value> = Vec::new();
+    let mut worker_instances: Vec<&serde_json::Value> = Vec::new();
+    let mut other_instances: Vec<&serde_json::Value> = Vec::new();
+
+    for instance in instances {
+        let process_type = instance["process_type"].as_str().unwrap_or("web");
+        match process_type {
+            "web" => web_instances.push(instance),
+            "worker" => worker_instances.push(instance),
+            _ => other_instances.push(instance),
+        }
+    }
+
+    let running_count = instances
+        .iter()
+        .filter(|i| i["status"].as_str() == Some("running"))
+        .count();
+
+    // Scale slider component
+    let scale_slider = format!(
+        r##"<div class="scale-control" x-data="{{ targetScale: {0}, isScaling: false }}">
+    <div class="scale-header">
+        <div class="scale-info">
+            <span class="scale-label">Instance Count</span>
+            <span class="scale-current">{1} running / {0} target</span>
+        </div>
+    </div>
+    <div class="scale-slider-container">
+        <input type="range" class="scale-slider"
+            min="{2}" max="{3}" x-model="targetScale"
+            @change="if(targetScale != {0}) {{ isScaling = true; $dispatch('scale-app', {{ count: targetScale }}) }}">
+        <div class="scale-input-group">
+            <input type="number" class="scale-input"
+                min="{2}" max="{3}" x-model="targetScale"
+                @keyup.enter="if(targetScale != {0}) {{ isScaling = true; $dispatch('scale-app', {{ count: targetScale }}) }}">
+            <button class="btn btn-primary btn-sm"
+                @click="if(targetScale != {0}) {{ isScaling = true; $dispatch('scale-app', {{ count: targetScale }}) }}"
+                :disabled="targetScale == {0} || isScaling"
+                x-text="isScaling ? 'Scaling...' : 'Apply'">Apply</button>
+        </div>
+    </div>
+    <div class="scale-limits">
+        <span>Min: {2}</span>
+        <span>Max: {3}</span>
+    </div>
+</div>
+<div x-show="isScaling" class="scale-progress">
+    <div class="loading-spinner"></div>
+    <span>Scaling in progress...</span>
+</div>
+<div class="htmx-listener"
+    hx-post="/apps/{4}/scale"
+    hx-trigger="scale-app from:body"
+    hx-swap="none"
+    hx-vals="js:{{count: event.detail.count}}"
+    hx-on::after-request="showToast('Scale updated', 'success'); setTimeout(() => htmx.trigger('#instances-list', 'reload'), 1000)"
+    ></div>"##,
+        scale, running_count, min_scale, max_scale, app_name
+    );
+
+    // Render process type cards
+    let web_card = render_process_type_card(app_name, "web", &web_instances);
+    let worker_card = if !worker_instances.is_empty() {
+        render_process_type_card(app_name, "worker", &worker_instances)
+    } else {
+        String::new()
+    };
+    let other_card = if !other_instances.is_empty() {
+        render_process_type_card(app_name, "other", &other_instances)
+    } else {
+        String::new()
+    };
+
+    // Resource usage overview section
+    let resource_overview = format!(
+        r##"<div class="resource-overview">
+    <h3>Resource Usage</h3>
+    <div class="resource-graphs" x-data="resourceMonitor('{0}')" x-init="startPolling()">
+        <div class="resource-card">
+            <div class="resource-header">
+                <span class="resource-label">CPU Usage</span>
+                <span class="resource-value" x-text="cpuUsage + '%'">--</span>
+            </div>
+            <div class="resource-bar">
+                <div class="resource-bar-fill cpu" :style="'width: ' + cpuUsage + '%'" :class="{{'warning': cpuUsage > 70, 'danger': cpuUsage > 90}}"></div>
+            </div>
+        </div>
+        <div class="resource-card">
+            <div class="resource-header">
+                <span class="resource-label">Memory Usage</span>
+                <span class="resource-value" x-text="memoryUsage + '%'">--</span>
+            </div>
+            <div class="resource-bar">
+                <div class="resource-bar-fill memory" :style="'width: ' + memoryUsage + '%'" :class="{{'warning': memoryUsage > 70, 'danger': memoryUsage > 90}}"></div>
+            </div>
+        </div>
+        <div class="resource-details">
+            <div class="resource-detail">
+                <span class="detail-label">CPU Cores</span>
+                <span class="detail-value" x-text="cpuCores">--</span>
+            </div>
+            <div class="resource-detail">
+                <span class="detail-label">Memory</span>
+                <span class="detail-value" x-text="memoryUsed + ' / ' + memoryLimit">--</span>
+            </div>
+        </div>
+    </div>
+</div>"##,
+        app_name
+    );
+
+    format!(
+        r##"<div class="instances-container" hx-trigger="reload from:body" hx-get="/dashboard/apps/{0}/instances" hx-swap="innerHTML">
+    {1}
+    {5}
+    <div class="process-types">
+        {2}
+        {3}
+        {4}
+    </div>
+</div>"##,
+        app_name, scale_slider, web_card, worker_card, other_card, resource_overview
+    )
+}
+
+fn render_process_type_card(app_name: &str, process_type: &str, instances: &[&serde_json::Value]) -> String {
+    let type_icon = match process_type {
+        "web" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>"##,
+        "worker" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>"##,
+        _ => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>"##,
+    };
+
+    let type_label = match process_type {
+        "web" => "Web",
+        "worker" => "Worker",
+        _ => "Other",
+    };
+
+    let running_count = instances.iter().filter(|i| i["status"].as_str() == Some("running")).count();
+    let total_count = instances.len();
+
+    let instance_items: Vec<String> = instances.iter().map(|instance| {
+        let id = instance["id"].as_str().unwrap_or("");
+        let status = instance["status"].as_str().unwrap_or("unknown");
+        let health = instance["health_status"].as_str().unwrap_or("unknown");
+        let port = instance["port"].as_i64().unwrap_or(0);
+        let _started_at = instance["started_at"].as_str().unwrap_or("");
+
+        let status_class = match status {
+            "running" => "status-running",
+            "starting" => "status-building",
+            "stopped" => "status-idle",
+            _ => "status-failed",
+        };
+
+        let health_class = match health {
+            "healthy" => "health-healthy",
+            "unhealthy" => "health-unhealthy",
+            _ => "health-unknown",
+        };
+
+        let health_icon = match health {
+            "healthy" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##,
+            "unhealthy" => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##,
+            _ => r##"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"##,
+        };
+
+        format!(
+            r##"<div class="instance-item {0}">
+    <div class="instance-main">
+        <div class="instance-id">{1}</div>
+        <div class="instance-meta">
+            <span class="instance-status {0}">{2}</span>
+            <span class="instance-health {3}" title="Health: {4}">{5}</span>
+            <span class="instance-port" title="Port">:{6}</span>
+        </div>
+    </div>
+    <div class="instance-actions">
+        <button class="btn btn-icon btn-sm" title="Restart instance"
+            hx-post="/apps/{7}/instances/{1}/restart"
+            hx-swap="none"
+            hx-on::after-request="showToast('Instance restarting', 'success'); setTimeout(() => htmx.trigger('#instances-list', 'reload'), 2000)">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+        </button>
+        <button class="btn btn-icon btn-sm btn-danger" title="Stop instance"
+            hx-post="/apps/{7}/instances/{1}/stop"
+            hx-confirm="Stop this instance?"
+            hx-swap="none"
+            hx-on::after-request="showToast('Instance stopped', 'success'); setTimeout(() => htmx.trigger('#instances-list', 'reload'), 1000)">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/>
+            </svg>
+        </button>
+    </div>
+</div>"##,
+            status_class, id, status, health_class, health, health_icon, port, app_name
+        )
+    }).collect();
+
+    let empty_state = if instances.is_empty() {
+        r##"<div class="empty-state small">
+            <p>No instances running</p>
+        </div>"##.to_string()
+    } else {
+        String::new()
+    };
+
+    format!(
+        r##"<div class="process-type-card">
+    <div class="process-type-header">
+        <div class="process-type-info">
+            {0}
+            <span class="process-type-name">{1}</span>
+        </div>
+        <div class="process-type-count">
+            <span class="count-running">{2}</span>/<span class="count-total">{3}</span>
+        </div>
+    </div>
+    <div class="instances-list">
+        {4}
+        {5}
+    </div>
+</div>"##,
+        type_icon, type_label, running_count, total_count, instance_items.join(""), empty_state
+    )
 }
 
 const LOGIN_HTML: &str = r##"<!DOCTYPE html>
@@ -3477,6 +3716,414 @@ body {
         grid-template-columns: 1fr;
     }
 }
+
+/* Instance Manager Styles */
+.instances-container {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.scale-control {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+}
+
+.scale-header {
+    margin-bottom: 1rem;
+}
+
+.scale-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.scale-label {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.scale-current {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.scale-slider-container {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.scale-slider {
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    appearance: none;
+    cursor: pointer;
+}
+
+.scale-slider::-webkit-slider-thumb {
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--primary);
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+
+.scale-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+}
+
+.scale-slider::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--primary);
+    cursor: pointer;
+    border: none;
+}
+
+.scale-input-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.scale-input {
+    width: 60px;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.375rem;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    text-align: center;
+    font-size: 0.875rem;
+}
+
+.scale-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+.scale-limits {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.scale-progress {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem;
+    background: var(--primary-light);
+    border-radius: 0.5rem;
+    margin-top: 1rem;
+    color: var(--primary);
+    font-size: 0.875rem;
+}
+
+.loading-spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--primary);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.htmx-listener {
+    display: none;
+}
+
+.process-types {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.process-type-card {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    overflow: hidden;
+}
+
+.process-type-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.25rem;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.process-type-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    color: var(--text-primary);
+}
+
+.process-type-info svg {
+    color: var(--text-secondary);
+}
+
+.process-type-name {
+    font-weight: 600;
+}
+
+.process-type-count {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.process-type-count .count-running {
+    color: var(--success);
+    font-weight: 600;
+}
+
+.instances-list {
+    padding: 0.5rem;
+}
+
+.instance-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.875rem 1rem;
+    border-radius: 0.5rem;
+    transition: background 0.15s ease;
+}
+
+.instance-item:hover {
+    background: var(--bg-secondary);
+}
+
+.instance-main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.instance-id {
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.instance-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+}
+
+.instance-status {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    font-weight: 500;
+    text-transform: capitalize;
+}
+
+.instance-status.status-running {
+    background: var(--success-light);
+    color: var(--success);
+}
+
+.instance-status.status-building {
+    background: var(--warning-light);
+    color: var(--warning);
+}
+
+.instance-status.status-idle {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.instance-status.status-failed {
+    background: var(--danger-light);
+    color: var(--danger);
+}
+
+.instance-health {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.instance-health.health-healthy {
+    color: var(--success);
+}
+
+.instance-health.health-unhealthy {
+    color: var(--danger);
+}
+
+.instance-health.health-unknown {
+    color: var(--text-muted);
+}
+
+.instance-port {
+    color: var(--text-muted);
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+}
+
+.instance-actions {
+    display: flex;
+    gap: 0.5rem;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.instance-item:hover .instance-actions {
+    opacity: 1;
+}
+
+.btn-icon {
+    padding: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-icon.btn-sm {
+    padding: 0.375rem;
+}
+
+.btn-danger {
+    background: var(--danger);
+    color: white;
+}
+
+.btn-danger:hover {
+    background: #dc2626;
+}
+
+.empty-state.small {
+    padding: 1.5rem;
+    text-align: center;
+}
+
+.empty-state.small p {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+/* Resource Usage Styles */
+.resource-overview {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+}
+
+.resource-overview h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: var(--text-primary);
+}
+
+.resource-graphs {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.resource-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.resource-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.resource-label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.resource-value {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+}
+
+.resource-bar {
+    height: 8px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.resource-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.resource-bar-fill.cpu {
+    background: var(--primary);
+}
+
+.resource-bar-fill.memory {
+    background: var(--success);
+}
+
+.resource-bar-fill.warning {
+    background: var(--warning);
+}
+
+.resource-bar-fill.danger {
+    background: var(--danger);
+}
+
+.resource-details {
+    display: flex;
+    gap: 2rem;
+    margin-top: 0.5rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.resource-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.detail-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.detail-value {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
 "##;
 
 const DASHBOARD_JS: &str = r##"
@@ -3865,6 +4512,65 @@ function confirmAction(message, callback) {
     if (confirm(message)) {
         callback();
     }
+}
+
+// Resource monitoring component for Alpine.js
+function resourceMonitor(appName) {
+    return {
+        appName: appName,
+        cpuUsage: 0,
+        memoryUsage: 0,
+        cpuCores: '--',
+        memoryUsed: '--',
+        memoryLimit: '--',
+        pollingInterval: null,
+
+        async startPolling() {
+            // Initial fetch
+            await this.fetchMetrics();
+            // Poll every 5 seconds
+            this.pollingInterval = setInterval(() => this.fetchMetrics(), 5000);
+        },
+
+        stopPolling() {
+            if (this.pollingInterval) {
+                clearInterval(this.pollingInterval);
+                this.pollingInterval = null;
+            }
+        },
+
+        async fetchMetrics() {
+            try {
+                const response = await fetch(`/apps/${this.appName}/metrics`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.status === 'ok' && data.data) {
+                        const metrics = data.data;
+                        this.cpuUsage = Math.round(metrics.cpu_percent || 0);
+                        this.memoryUsage = Math.round(metrics.memory_percent || 0);
+                        this.cpuCores = metrics.cpu_cores || '--';
+                        this.memoryUsed = this.formatBytes(metrics.memory_used || 0);
+                        this.memoryLimit = this.formatBytes(metrics.memory_limit || 0);
+                    }
+                }
+            } catch (e) {
+                // Silently fail - metrics may not be available
+                console.debug('Failed to fetch metrics:', e);
+            }
+        },
+
+        formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        },
+
+        destroy() {
+            this.stopPolling();
+        }
+    };
 }
 "##;
 
