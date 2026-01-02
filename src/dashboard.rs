@@ -800,56 +800,292 @@ pub fn render_domains_list(domains: &[serde_json::Value]) -> String {
 /// Generate HTML for addons list
 pub fn render_addons_list(addons: &[serde_json::Value]) -> String {
     if addons.is_empty() {
-        return r##"<div class="empty-state small">No add-ons attached</div>"##.to_string();
+        return r##"<div class="empty-state small">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+            </svg>
+            <h3>No Add-ons Attached</h3>
+            <p>Add databases, caches, and storage to your app</p>
+        </div>"##.to_string();
     }
 
     let items: Vec<String> = addons.iter().map(|addon| {
         let addon_type = addon["addon_type"].as_str().unwrap_or("unknown");
         let plan = addon["plan"].as_str().unwrap_or("hobby");
         let status = addon["status"].as_str().unwrap_or("provisioning");
+        let connection_url = addon["connection_url"].as_str().unwrap_or("");
+        let env_var_name = addon["env_var_name"].as_str().unwrap_or("");
+        let app_name = addon["app_name"].as_str().unwrap_or("");
+        let addon_id = addon["id"].as_str().unwrap_or("");
 
         let status_class = match status {
             "running" => "status-running",
             "provisioning" => "status-building",
             "failed" => "status-failed",
+            "stopped" => "status-idle",
             _ => "status-idle",
         };
 
-        let icon = match addon_type {
-            "postgres" => r##"<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/>"##,
-            "redis" => r##"<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2"/>"##,
-            _ => r##"<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8"/>"##,
+        let status_text = match status {
+            "running" => "Running",
+            "provisioning" => "Provisioning...",
+            "failed" => "Failed",
+            "stopped" => "Stopped",
+            _ => status,
+        };
+
+        // Get plan details
+        let plan_details = match plan {
+            "hobby" => ("Hobby", "256 MB RAM"),
+            "basic" => ("Basic", "512 MB RAM"),
+            "standard" => ("Standard", "1 GB RAM"),
+            "premium" => ("Premium", "2 GB RAM"),
+            _ => (plan, ""),
+        };
+
+        // Addon-specific info
+        let (icon, addon_name, addon_desc) = match addon_type {
+            "postgres" => (
+                r##"<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/>"##,
+                "PostgreSQL",
+                "Reliable SQL database with full ACID compliance"
+            ),
+            "redis" => (
+                r##"<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/>"##,
+                "Redis",
+                "In-memory cache, queue, and session store"
+            ),
+            "storage" => (
+                r##"<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>"##,
+                "S3 Storage",
+                "Object storage compatible with S3 API"
+            ),
+            _ => (
+                r##"<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>"##,
+                addon_type,
+                ""
+            ),
+        };
+
+        // Credentials section (only show if running and has connection URL)
+        let credentials_section = if status == "running" && !connection_url.is_empty() {
+            // Mask the connection URL for display (show protocol and host, hide password)
+            let masked_url = if let Some(at_pos) = connection_url.find('@') {
+                if let Some(proto_end) = connection_url.find("://") {
+                    format!("{}://****:****{}", &connection_url[..proto_end], &connection_url[at_pos..])
+                } else {
+                    "****".to_string()
+                }
+            } else {
+                connection_url.to_string()
+            };
+
+            format!(
+                r##"<div class="addon-credentials" x-data="{{ showCredentials: false }}">
+                <div class="credentials-header">
+                    <span class="credentials-label">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                        </svg>
+                        Credentials
+                    </span>
+                    <button class="btn btn-xs btn-secondary" @click="showCredentials = !showCredentials">
+                        <span x-text="showCredentials ? 'Hide' : 'Show'">Show</span>
+                    </button>
+                </div>
+                <div class="credentials-body" x-show="showCredentials" x-cloak>
+                    <div class="credential-row">
+                        <span class="credential-label">{0}</span>
+                        <div class="credential-value-wrapper">
+                            <code class="credential-value" x-data="{{ revealed: false }}">
+                                <span x-show="!revealed">{1}</span>
+                                <span x-show="revealed" x-cloak>{2}</span>
+                                <button class="btn btn-icon btn-xs" @click="revealed = !revealed" title="Toggle visibility">
+                                    <svg x-show="!revealed" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                                    </svg>
+                                    <svg x-show="revealed" x-cloak fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                                    </svg>
+                                </button>
+                            </code>
+                            <button class="btn btn-icon btn-xs" onclick="copyToClipboard('{2}')" title="Copy to clipboard">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>"##,
+                env_var_name, masked_url, connection_url
+            )
+        } else {
+            String::new()
+        };
+
+        // Usage metrics placeholder (will be populated via HTMX)
+        let metrics_section = if status == "running" {
+            format!(
+                r##"<div class="addon-metrics" hx-get="/dashboard/apps/{}/addons/{}/metrics" hx-trigger="load, every 30s" hx-swap="innerHTML">
+                <div class="metrics-loading">
+                    <span class="spinner-sm"></span> Loading metrics...
+                </div>
+            </div>"##,
+                app_name, addon_id
+            )
+        } else {
+            String::new()
         };
 
         format!(
-            r##"<div class="addon-item">
-            <div class="addon-info">
-                <svg class="addon-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24">
-                    {0}
-                </svg>
-                <div class="addon-details">
-                    <span class="addon-type">{1}</span>
-                    <span class="addon-plan">{2}</span>
+            r##"<div class="addon-card-full">
+            <div class="addon-card-header">
+                <div class="addon-identity">
+                    <div class="addon-icon-wrapper">
+                        <svg class="addon-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="28" height="28">
+                            {icon}
+                        </svg>
+                    </div>
+                    <div class="addon-info">
+                        <h4 class="addon-name">{addon_name}</h4>
+                        <p class="addon-desc">{addon_desc}</p>
+                    </div>
+                </div>
+                <div class="addon-status-actions">
+                    <span class="status-badge {status_class}">{status_text}</span>
+                    <div class="addon-actions-menu" x-data="{{ open: false }}">
+                        <button class="btn btn-icon btn-sm" @click="open = !open" @click.away="open = false">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"/>
+                            </svg>
+                        </button>
+                        <div class="dropdown-menu" x-show="open" x-cloak>
+                            <button class="dropdown-item"
+                                hx-post="/apps/{app_name}/addons/{addon_type}/restart"
+                                hx-swap="none"
+                                hx-on::after-request="showToast('Add-on restarting...', 'success'); htmx.trigger('#addons-list', 'reload')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                                </svg>
+                                Restart
+                            </button>
+                            <button class="dropdown-item dropdown-item-danger"
+                                hx-delete="/apps/{app_name}/addons/{addon_type}"
+                                hx-confirm="Remove {addon_name}? This will permanently delete all data!"
+                                hx-swap="none"
+                                hx-on::after-request="showToast('Add-on removed', 'success'); htmx.trigger('#addons-list', 'reload')">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                </svg>
+                                Remove
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <div class="addon-actions">
-                <span class="status-badge {3}">{4}</span>
-                <button class="btn btn-icon btn-danger"
-                    hx-delete="/apps/current/addons/{1}"
-                    hx-confirm="Remove {1}? This will delete all data!"
-                    hx-swap="none"
-                    hx-on::after-request="htmx.trigger('#addons-list', 'reload')">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                    </svg>
-                </button>
+            <div class="addon-card-body">
+                <div class="addon-plan-info">
+                    <span class="plan-name">{plan_name}</span>
+                    <span class="plan-resources">{plan_resources}</span>
+                </div>
+                {credentials_section}
+                {metrics_section}
             </div>
         </div>"##,
-            icon, addon_type, plan, status_class, status
+            icon = icon,
+            addon_name = addon_name,
+            addon_desc = addon_desc,
+            status_class = status_class,
+            status_text = status_text,
+            app_name = app_name,
+            addon_type = addon_type,
+            plan_name = plan_details.0,
+            plan_resources = plan_details.1,
+            credentials_section = credentials_section,
+            metrics_section = metrics_section,
         )
     }).collect();
 
-    format!(r##"<div class="addons-list">{}</div>"##, items.join(""))
+    format!(r##"<div class="addons-grid">{}</div>"##, items.join(""))
+}
+
+/// Generate HTML for addon metrics
+pub fn render_addon_metrics(addon_type: &str, cpu_percent: f64, memory_used: u64, memory_limit: u64, connections: Option<u32>) -> String {
+    let memory_percent = if memory_limit > 0 {
+        (memory_used as f64 / memory_limit as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let memory_used_mb = memory_used / (1024 * 1024);
+    let memory_limit_mb = memory_limit / (1024 * 1024);
+
+    // CPU bar color
+    let cpu_color = if cpu_percent > 80.0 { "var(--danger)" }
+        else if cpu_percent > 60.0 { "var(--warning)" }
+        else { "var(--success)" };
+
+    // Memory bar color
+    let mem_color = if memory_percent > 80.0 { "var(--danger)" }
+        else if memory_percent > 60.0 { "var(--warning)" }
+        else { "var(--success)" };
+
+    // Connection info (for postgres/redis)
+    let connections_html = if let Some(conns) = connections {
+        format!(
+            r##"<div class="metric-item">
+                <div class="metric-header">
+                    <span class="metric-label">Connections</span>
+                    <span class="metric-value">{}</span>
+                </div>
+            </div>"##,
+            conns
+        )
+    } else {
+        String::new()
+    };
+
+    // Addon-specific metrics hint
+    let addon_hint = match addon_type {
+        "postgres" => "PostgreSQL database metrics",
+        "redis" => "Redis cache metrics",
+        "storage" => "S3-compatible storage metrics",
+        _ => "Add-on metrics",
+    };
+
+    format!(
+        r##"<div class="addon-metrics-content" title="{addon_hint}">
+            <div class="metric-item">
+                <div class="metric-header">
+                    <span class="metric-label">CPU</span>
+                    <span class="metric-value">{cpu_percent:.1}%</span>
+                </div>
+                <div class="metric-bar">
+                    <div class="metric-bar-fill" style="width: {cpu_percent:.1}%; background: {cpu_color}"></div>
+                </div>
+            </div>
+            <div class="metric-item">
+                <div class="metric-header">
+                    <span class="metric-label">Memory</span>
+                    <span class="metric-value">{memory_used_mb} / {memory_limit_mb} MB</span>
+                </div>
+                <div class="metric-bar">
+                    <div class="metric-bar-fill" style="width: {memory_percent:.1}%; background: {mem_color}"></div>
+                </div>
+            </div>
+            {connections_html}
+        </div>"##,
+        addon_hint = addon_hint,
+        cpu_percent = cpu_percent,
+        cpu_color = cpu_color,
+        memory_used_mb = memory_used_mb,
+        memory_limit_mb = memory_limit_mb,
+        memory_percent = memory_percent,
+        mem_color = mem_color,
+        connections_html = connections_html,
+    )
 }
 
 /// Generate HTML for deployments list
@@ -1601,66 +1837,312 @@ git push spawngate main
         </div>
     </div>
 
-    <!-- Add Add-on Modal -->
+    <!-- Add Add-on Modal (Marketplace Style) -->
     <div class="modal-backdrop" x-show="showModal === 'add-addon'" x-cloak
         @click.self="showModal = null" @keydown.escape.window="showModal = null">
-        <div class="modal modal-lg" @click.stop>
+        <div class="modal modal-xl" @click.stop x-data="{
+            addonStep: 1,
+            selectedAddon: 'postgres',
+            selectedPlan: 'standard',
+            isProvisioning: false,
+            provisioningProgress: 0,
+            provisioningStatus: '',
+            provisioningComplete: false,
+            connectionUrl: '',
+            envVarName: '',
+            error: '',
+            reset() {
+                this.addonStep = 1;
+                this.selectedAddon = 'postgres';
+                this.selectedPlan = 'standard';
+                this.isProvisioning = false;
+                this.provisioningProgress = 0;
+                this.provisioningStatus = '';
+                this.provisioningComplete = false;
+                this.connectionUrl = '';
+                this.envVarName = '';
+                this.error = '';
+            },
+            async provisionAddon() {
+                this.isProvisioning = true;
+                this.error = '';
+                this.provisioningStatus = 'Initializing...';
+                this.provisioningProgress = 10;
+
+                try {
+                    const formData = new FormData();
+                    formData.append('type', this.selectedAddon);
+                    formData.append('plan', this.selectedPlan);
+
+                    this.provisioningStatus = 'Creating container...';
+                    this.provisioningProgress = 30;
+
+                    const response = await fetch('/apps/' + currentApp + '/addons', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    this.provisioningProgress = 60;
+                    this.provisioningStatus = 'Configuring add-on...';
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.provisioningProgress = 90;
+                        this.provisioningStatus = 'Finalizing...';
+
+                        setTimeout(() => {
+                            this.provisioningProgress = 100;
+                            this.provisioningStatus = 'Complete!';
+                            this.provisioningComplete = true;
+                            this.connectionUrl = data.data?.connection_url || '';
+                            this.envVarName = data.data?.env_var_name || '';
+                            htmx.trigger('#addons-list', 'reload');
+                        }, 500);
+                    } else {
+                        const err = await response.json();
+                        this.error = err.error || 'Failed to provision add-on';
+                        this.isProvisioning = false;
+                    }
+                } catch (e) {
+                    this.error = 'Failed to provision add-on: ' + e.message;
+                    this.isProvisioning = false;
+                }
+            }
+        }">
             <div class="modal-header">
-                <h2>Add Add-on</h2>
-                <button class="close-btn" @click="showModal = null">&times;</button>
+                <h2 x-text="addonStep === 1 ? 'Add-on Marketplace' : (addonStep === 2 ? 'Configure ' + selectedAddon.charAt(0).toUpperCase() + selectedAddon.slice(1) : 'Provisioning Complete')"></h2>
+                <button class="close-btn" @click="showModal = null; reset()">&times;</button>
             </div>
-            <form :hx-post="'/apps/' + currentApp + '/addons'" hx-swap="none" @htmx:after-request="handleAddonAdded($event)">
-                <div class="modal-body">
-                    <div class="addon-options">
-                        <label class="addon-option">
-                            <input type="radio" name="type" value="postgres" checked>
-                            <div class="addon-card">
-                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/>
-                                </svg>
-                                <span class="addon-name">PostgreSQL</span>
-                                <span class="addon-desc">Reliable SQL database</span>
+
+            <!-- Step 1: Marketplace Selection -->
+            <div x-show="addonStep === 1">
+                <div class="modal-body marketplace-body">
+                    <div class="marketplace-grid">
+                        <!-- PostgreSQL -->
+                        <div class="marketplace-card" :class="{ 'selected': selectedAddon === 'postgres' }" @click="selectedAddon = 'postgres'">
+                            <div class="marketplace-card-header">
+                                <div class="addon-icon-lg postgres-icon">
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="40" height="40">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/>
+                                    </svg>
+                                </div>
+                                <span class="marketplace-badge popular">Popular</span>
                             </div>
-                        </label>
-                        <label class="addon-option">
-                            <input type="radio" name="type" value="redis">
-                            <div class="addon-card">
-                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/>
-                                </svg>
-                                <span class="addon-name">Redis</span>
-                                <span class="addon-desc">In-memory cache & queue</span>
+                            <h3 class="marketplace-title">PostgreSQL</h3>
+                            <p class="marketplace-desc">The most advanced open-source SQL database with full ACID compliance, JSON support, and powerful extensions.</p>
+                            <div class="marketplace-features">
+                                <span class="feature-tag">SQL</span>
+                                <span class="feature-tag">ACID</span>
+                                <span class="feature-tag">JSON</span>
                             </div>
-                        </label>
-                        <label class="addon-option">
-                            <input type="radio" name="type" value="storage">
-                            <div class="addon-card">
-                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="32" height="32">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
-                                </svg>
-                                <span class="addon-name">S3 Storage</span>
-                                <span class="addon-desc">Object storage (MinIO)</span>
+                            <div class="marketplace-pricing">Starting at <strong>Free</strong></div>
+                        </div>
+
+                        <!-- Redis -->
+                        <div class="marketplace-card" :class="{ 'selected': selectedAddon === 'redis' }" @click="selectedAddon = 'redis'">
+                            <div class="marketplace-card-header">
+                                <div class="addon-icon-lg redis-icon">
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="40" height="40">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/>
+                                    </svg>
+                                </div>
                             </div>
-                        </label>
-                    </div>
-                    <div class="form-group">
-                        <label for="addon-plan">Plan</label>
-                        <select id="addon-plan" name="plan" class="select">
-                            <option value="hobby">Hobby - 256MB RAM</option>
-                            <option value="basic">Basic - 512MB RAM</option>
-                            <option value="standard" selected>Standard - 1GB RAM</option>
-                            <option value="premium">Premium - 2GB RAM</option>
-                        </select>
+                            <h3 class="marketplace-title">Redis</h3>
+                            <p class="marketplace-desc">Lightning-fast in-memory data store. Perfect for caching, sessions, queues, and real-time features.</p>
+                            <div class="marketplace-features">
+                                <span class="feature-tag">Cache</span>
+                                <span class="feature-tag">Queue</span>
+                                <span class="feature-tag">Pub/Sub</span>
+                            </div>
+                            <div class="marketplace-pricing">Starting at <strong>Free</strong></div>
+                        </div>
+
+                        <!-- S3 Storage -->
+                        <div class="marketplace-card" :class="{ 'selected': selectedAddon === 'storage' }" @click="selectedAddon = 'storage'">
+                            <div class="marketplace-card-header">
+                                <div class="addon-icon-lg storage-icon">
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="40" height="40">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
+                                    </svg>
+                                </div>
+                            </div>
+                            <h3 class="marketplace-title">S3 Storage</h3>
+                            <p class="marketplace-desc">S3-compatible object storage powered by MinIO. Store files, images, backups, and more.</p>
+                            <div class="marketplace-features">
+                                <span class="feature-tag">S3 API</span>
+                                <span class="feature-tag">Objects</span>
+                                <span class="feature-tag">CDN Ready</span>
+                            </div>
+                            <div class="marketplace-pricing">Starting at <strong>Free</strong></div>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" @click="showModal = null">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Provision Add-on</button>
+                    <button type="button" class="btn btn-secondary" @click="showModal = null; reset()">Cancel</button>
+                    <button type="button" class="btn btn-primary" @click="addonStep = 2">
+                        Configure
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                        </svg>
+                    </button>
                 </div>
-            </form>
+            </div>
+
+            <!-- Step 2: Configure Plan -->
+            <div x-show="addonStep === 2 && !isProvisioning && !provisioningComplete">
+                <div class="modal-body">
+                    <div class="plan-selector">
+                        <h3 class="plan-section-title">Select a Plan</h3>
+                        <div class="plan-grid">
+                            <label class="plan-card" :class="{ 'selected': selectedPlan === 'hobby' }">
+                                <input type="radio" name="plan" value="hobby" x-model="selectedPlan">
+                                <div class="plan-card-content">
+                                    <span class="plan-name">Hobby</span>
+                                    <span class="plan-price">Free</span>
+                                    <ul class="plan-features">
+                                        <li>256 MB RAM</li>
+                                        <li>Shared CPU</li>
+                                        <li>10 connections</li>
+                                    </ul>
+                                </div>
+                            </label>
+                            <label class="plan-card" :class="{ 'selected': selectedPlan === 'basic' }">
+                                <input type="radio" name="plan" value="basic" x-model="selectedPlan">
+                                <div class="plan-card-content">
+                                    <span class="plan-name">Basic</span>
+                                    <span class="plan-price">$5/mo</span>
+                                    <ul class="plan-features">
+                                        <li>512 MB RAM</li>
+                                        <li>Shared CPU</li>
+                                        <li>20 connections</li>
+                                    </ul>
+                                </div>
+                            </label>
+                            <label class="plan-card recommended" :class="{ 'selected': selectedPlan === 'standard' }">
+                                <input type="radio" name="plan" value="standard" x-model="selectedPlan">
+                                <span class="recommended-badge">Recommended</span>
+                                <div class="plan-card-content">
+                                    <span class="plan-name">Standard</span>
+                                    <span class="plan-price">$15/mo</span>
+                                    <ul class="plan-features">
+                                        <li>1 GB RAM</li>
+                                        <li>Dedicated CPU</li>
+                                        <li>50 connections</li>
+                                    </ul>
+                                </div>
+                            </label>
+                            <label class="plan-card" :class="{ 'selected': selectedPlan === 'premium' }">
+                                <input type="radio" name="plan" value="premium" x-model="selectedPlan">
+                                <div class="plan-card-content">
+                                    <span class="plan-name">Premium</span>
+                                    <span class="plan-price">$50/mo</span>
+                                    <ul class="plan-features">
+                                        <li>2 GB RAM</li>
+                                        <li>Dedicated CPU</li>
+                                        <li>100 connections</li>
+                                    </ul>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="addon-summary">
+                        <h4>Summary</h4>
+                        <div class="summary-row">
+                            <span>Add-on:</span>
+                            <span x-text="selectedAddon.charAt(0).toUpperCase() + selectedAddon.slice(1)"></span>
+                        </div>
+                        <div class="summary-row">
+                            <span>Plan:</span>
+                            <span x-text="selectedPlan.charAt(0).toUpperCase() + selectedPlan.slice(1)"></span>
+                        </div>
+                        <div class="summary-row">
+                            <span>App:</span>
+                            <span x-text="currentApp"></span>
+                        </div>
+                    </div>
+
+                    <div class="modal-error" x-show="error" x-text="error"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @click="addonStep = 1">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+                        </svg>
+                        Back
+                    </button>
+                    <button type="button" class="btn btn-primary" @click="provisionAddon()">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+                        </svg>
+                        Provision Add-on
+                    </button>
+                </div>
+            </div>
+
+            <!-- Provisioning Progress -->
+            <div x-show="isProvisioning && !provisioningComplete">
+                <div class="modal-body provisioning-body">
+                    <div class="provisioning-animation">
+                        <div class="provisioning-icon">
+                            <svg class="spin" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="64" height="64">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                            </svg>
+                        </div>
+                        <h3 class="provisioning-title" x-text="'Provisioning ' + selectedAddon.charAt(0).toUpperCase() + selectedAddon.slice(1)"></h3>
+                        <p class="provisioning-status" x-text="provisioningStatus"></p>
+                        <div class="provisioning-bar">
+                            <div class="provisioning-bar-fill" :style="'width: ' + provisioningProgress + '%'"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Provisioning Complete -->
+            <div x-show="provisioningComplete">
+                <div class="modal-body success-body">
+                    <div class="success-animation">
+                        <div class="success-icon">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="64" height="64">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                        </div>
+                        <h3 class="success-title" x-text="selectedAddon.charAt(0).toUpperCase() + selectedAddon.slice(1) + ' is Ready!'"></h3>
+                        <p class="success-desc">Your add-on has been provisioned and connected to your app.</p>
+                    </div>
+
+                    <div class="connection-info" x-show="connectionUrl">
+                        <h4>Connection Details</h4>
+                        <div class="connection-row">
+                            <span class="connection-label" x-text="envVarName"></span>
+                            <div class="connection-value-wrapper">
+                                <code class="connection-value" x-data="{ revealed: false }">
+                                    <span x-show="!revealed">••••••••••••••••••••</span>
+                                    <span x-show="revealed" x-cloak x-text="connectionUrl"></span>
+                                    <button class="btn btn-icon btn-xs" @click="revealed = !revealed">
+                                        <svg x-show="!revealed" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                                        </svg>
+                                        <svg x-show="revealed" x-cloak fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                                        </svg>
+                                    </button>
+                                </code>
+                                <button class="btn btn-icon btn-xs" @click="navigator.clipboard.writeText(connectionUrl); showToast('Copied!', 'success')">
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <p class="connection-note">This variable has been automatically added to your app's config.</p>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" @click="showModal = null; reset()">Done</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -2811,53 +3293,675 @@ body {
     display: none !important;
 }
 
-/* Addons List */
-.addons-list {
+/* Addons Grid (New Marketplace Style) */
+.addons-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 1rem;
+}
+
+.addon-card-full {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    overflow: hidden;
+}
+
+.addon-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.addon-identity {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+
+.addon-icon-wrapper {
+    width: 48px;
+    height: 48px;
+    border-radius: 0.5rem;
+    background: var(--bg-tertiary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary);
+}
+
+.addon-card-full .addon-info {
     display: flex;
     flex-direction: column;
+    gap: 0.125rem;
+}
+
+.addon-card-full .addon-name {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.addon-card-full .addon-desc {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 0;
+    max-width: 200px;
+}
+
+.addon-status-actions {
+    display: flex;
+    align-items: center;
     gap: 0.5rem;
 }
 
-.addon-item {
+.addon-actions-menu {
+    position: relative;
+}
+
+.addon-card-body {
+    padding: 1rem;
+}
+
+.addon-plan-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: 0.375rem;
+}
+
+.addon-plan-info .plan-name {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.addon-plan-info .plan-resources {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* Addon Credentials */
+.addon-credentials {
+    margin-top: 1rem;
+    border-top: 1px solid var(--border-color);
+    padding-top: 1rem;
+}
+
+.credentials-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.875rem 1rem;
-    background: var(--bg-secondary);
-    border-radius: 0.5rem;
+    margin-bottom: 0.75rem;
 }
 
-.addon-info {
+.credentials-label {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-}
-
-.addon-icon {
+    gap: 0.375rem;
+    font-size: 0.75rem;
+    font-weight: 500;
     color: var(--text-muted);
+    text-transform: uppercase;
 }
 
-.addon-details {
+.credentials-body {
+    background: var(--bg-tertiary);
+    border-radius: 0.375rem;
+    padding: 0.75rem;
+}
+
+.credential-row {
     display: flex;
     flex-direction: column;
+    gap: 0.375rem;
 }
 
-.addon-type {
-    font-weight: 500;
-    color: var(--text-primary);
-    text-transform: capitalize;
-}
-
-.addon-plan {
+.credential-label {
     font-size: 0.75rem;
+    font-weight: 500;
     color: var(--text-muted);
-    text-transform: capitalize;
 }
 
-.addon-actions {
+.credential-value-wrapper {
     display: flex;
     align-items: center;
+    gap: 0.375rem;
+}
+
+.credential-value {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    background: var(--bg-primary);
+    padding: 0.5rem 0.625rem;
+    border-radius: 0.25rem;
+    overflow-x: auto;
+    word-break: break-all;
+}
+
+/* Addon Metrics */
+.addon-metrics {
+    margin-top: 1rem;
+    border-top: 1px solid var(--border-color);
+    padding-top: 1rem;
+}
+
+.addon-metrics-content {
+    display: flex;
+    flex-direction: column;
     gap: 0.75rem;
+}
+
+.metrics-loading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.metrics-unavailable {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.metric-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.metric-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.metric-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.metric-value {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.metric-bar {
+    height: 4px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.metric-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+/* Marketplace Modal */
+.modal-xl {
+    max-width: 900px;
+}
+
+.marketplace-body {
+    padding: 1.5rem;
+}
+
+.marketplace-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 768px) {
+    .marketplace-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.marketplace-card {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.marketplace-card:hover {
+    border-color: var(--primary);
+    background: var(--bg-tertiary);
+}
+
+.marketplace-card.selected {
+    border-color: var(--primary);
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.marketplace-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1rem;
+}
+
+.addon-icon-lg {
+    width: 56px;
+    height: 56px;
+    border-radius: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.postgres-icon {
+    background: linear-gradient(135deg, #336791, #2d5a7b);
+    color: white;
+}
+
+.redis-icon {
+    background: linear-gradient(135deg, #dc382d, #b52e26);
+    color: white;
+}
+
+.storage-icon {
+    background: linear-gradient(135deg, #c72c48, #9c2539);
+    color: white;
+}
+
+.marketplace-badge {
+    font-size: 0.625rem;
+    font-weight: 600;
+    padding: 0.25rem 0.5rem;
+    border-radius: 9999px;
+    text-transform: uppercase;
+}
+
+.marketplace-badge.popular {
+    background: rgba(34, 197, 94, 0.1);
+    color: var(--success);
+}
+
+.marketplace-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 0.5rem 0;
+}
+
+.marketplace-desc {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+    margin: 0 0 1rem 0;
+    min-height: 3.5rem;
+}
+
+.marketplace-features {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-bottom: 1rem;
+}
+
+.feature-tag {
+    font-size: 0.625rem;
+    font-weight: 500;
+    padding: 0.25rem 0.5rem;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    border-radius: 0.25rem;
+}
+
+.marketplace-pricing {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.marketplace-pricing strong {
+    color: var(--success);
+}
+
+/* Plan Selector */
+.plan-selector {
+    margin-bottom: 1.5rem;
+}
+
+.plan-section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 1rem 0;
+}
+
+.plan-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.75rem;
+}
+
+@media (max-width: 768px) {
+    .plan-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.plan-card {
+    position: relative;
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.plan-card input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.plan-card:hover {
+    border-color: var(--primary);
+}
+
+.plan-card.selected {
+    border-color: var(--primary);
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.plan-card.recommended {
+    border-color: var(--success);
+}
+
+.plan-card.recommended.selected {
+    border-color: var(--success);
+    background: rgba(34, 197, 94, 0.1);
+}
+
+.recommended-badge {
+    position: absolute;
+    top: -0.5rem;
+    right: 0.5rem;
+    font-size: 0.625rem;
+    font-weight: 600;
+    padding: 0.125rem 0.375rem;
+    background: var(--success);
+    color: white;
+    border-radius: 0.25rem;
+    text-transform: uppercase;
+}
+
+.plan-card-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+
+.plan-card .plan-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.25rem;
+}
+
+.plan-card .plan-price {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--primary);
+    margin-bottom: 0.75rem;
+}
+
+.plan-card .plan-features {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.plan-card .plan-features li {
+    margin-bottom: 0.25rem;
+}
+
+/* Addon Summary */
+.addon-summary {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+.addon-summary h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 0.75rem 0;
+}
+
+.summary-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.375rem 0;
+    font-size: 0.875rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.summary-row:last-child {
+    border-bottom: none;
+}
+
+.summary-row span:first-child {
+    color: var(--text-muted);
+}
+
+.summary-row span:last-child {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+/* Provisioning Animation */
+.provisioning-body {
+    padding: 3rem 1.5rem;
+}
+
+.provisioning-animation {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+
+.provisioning-icon {
+    color: var(--primary);
+    margin-bottom: 1.5rem;
+}
+
+.provisioning-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 0.5rem 0;
+}
+
+.provisioning-status {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    margin: 0 0 1.5rem 0;
+}
+
+.provisioning-bar {
+    width: 100%;
+    max-width: 300px;
+    height: 8px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.provisioning-bar-fill {
+    height: 100%;
+    background: var(--primary);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.spin {
+    animation: spin 1.5s linear infinite;
+}
+
+/* Success Animation */
+.success-body {
+    padding: 2rem 1.5rem;
+}
+
+.success-animation {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+.success-icon {
+    color: var(--success);
+    margin-bottom: 1rem;
+}
+
+.success-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 0.5rem 0;
+}
+
+.success-desc {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    margin: 0;
+}
+
+/* Connection Info */
+.connection-info {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+.connection-info h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 0.75rem 0;
+}
+
+.connection-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    margin-bottom: 0.75rem;
+}
+
+.connection-label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.connection-value-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+}
+
+.connection-value {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    font-size: 0.8125rem;
+    background: var(--bg-tertiary);
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.25rem;
+    overflow-x: auto;
+}
+
+.connection-note {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 0;
+}
+
+/* Spinner */
+.spinner-sm {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* Dropdown Menu */
+.dropdown-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    min-width: 150px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 100;
+    overflow: hidden;
+}
+
+.dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.625rem 0.875rem;
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s ease;
+}
+
+.dropdown-item:hover {
+    background: var(--bg-secondary);
+}
+
+.dropdown-item-danger {
+    color: var(--danger);
+}
+
+.dropdown-item-danger:hover {
+    background: rgba(239, 68, 68, 0.1);
 }
 
 /* Deployments List */
@@ -5234,7 +6338,7 @@ mod tests {
     fn test_render_addons_list_empty() {
         let addons: Vec<serde_json::Value> = vec![];
         let html = render_addons_list(&addons);
-        assert!(html.contains("No add-ons attached"));
+        assert!(html.contains("No Add-ons Attached"));
     }
 
     #[test]
@@ -5243,12 +6347,13 @@ mod tests {
             serde_json::json!({
                 "addon_type": "postgres",
                 "plan": "standard",
-                "status": "running"
+                "status": "running",
+                "app_name": "myapp"
             })
         ];
         let html = render_addons_list(&addons);
-        assert!(html.contains("postgres"));
-        assert!(html.contains("standard"));
+        assert!(html.contains("PostgreSQL"));
+        assert!(html.contains("Standard"));
         assert!(html.contains("status-running"));
     }
 

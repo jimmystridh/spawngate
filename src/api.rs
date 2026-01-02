@@ -2492,9 +2492,15 @@ impl PlatformApi {
                     Ok(addons) => {
                         let addons_json: Vec<serde_json::Value> = addons.iter().map(|a| {
                             serde_json::json!({
+                                "id": a.id,
                                 "addon_type": a.addon_type,
                                 "plan": a.plan,
                                 "status": a.status,
+                                "connection_url": a.connection_url,
+                                "env_var_name": a.env_var_name,
+                                "container_id": a.container_id,
+                                "created_at": a.created_at,
+                                "app_name": app_name,
                             })
                         }).collect();
                         let html = dashboard::render_addons_list(&addons_json);
@@ -2505,6 +2511,45 @@ impl PlatformApi {
                         html_response(StatusCode::INTERNAL_SERVER_ERROR,
                             r##"<div class="error">Failed to load addons</div>"##)
                     }
+                }
+            }
+
+            // Get addon metrics (HTMX partial)
+            (&Method::GET, p) if p.contains("/addons/") && p.ends_with("/metrics") => {
+                // Parse: /dashboard/apps/{app}/addons/{addon_id}/metrics
+                let parts: Vec<&str> = p.split('/').collect();
+                if parts.len() >= 6 {
+                    let app_name = parts[3];
+                    let addon_id = parts[5];
+
+                    // Get addon info from database
+                    if let Ok(addons) = self.db.get_app_addons(app_name) {
+                        if let Some(addon) = addons.iter().find(|a| a.id == addon_id) {
+                            // Get container stats if available
+                            if let Some(ref container_id) = addon.container_id {
+                                match self.instance_manager.get_container_stats(container_id).await {
+                                    Ok(stats) => {
+                                        let html = dashboard::render_addon_metrics(
+                                            &addon.addon_type,
+                                            stats.cpu_percent,
+                                            stats.memory_used,
+                                            stats.memory_limit,
+                                            None, // TODO: Get actual connections from addon
+                                        );
+                                        return html_response(StatusCode::OK, html);
+                                    }
+                                    Err(_) => {
+                                        // Container might not be running
+                                        let html = r##"<div class="metrics-unavailable">Metrics unavailable</div>"##;
+                                        return html_response(StatusCode::OK, html);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    html_response(StatusCode::OK, r##"<div class="metrics-unavailable">Metrics unavailable</div>"##)
+                } else {
+                    html_response(StatusCode::BAD_REQUEST, r##"<div class="error">Invalid request</div>"##)
                 }
             }
 

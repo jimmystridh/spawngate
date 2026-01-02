@@ -106,11 +106,11 @@ Full-featured web UI for managing the PaaS platform.
 - [x] SSL certificate status
 - [x] Auto-renew indicators
 
-### Phase 6: Add-ons & Services
-- [ ] Add-on marketplace view
-- [ ] One-click add-on provisioning
-- [ ] Add-on credentials (with copy button)
-- [ ] Usage metrics per add-on
+### Phase 6: Add-ons & Services ✅
+- [x] Add-on marketplace view
+- [x] One-click add-on provisioning
+- [x] Add-on credentials (with copy button)
+- [x] Usage metrics per add-on
 
 ### Phase 7: Webhooks & CI
 - [ ] Webhook configuration UI
