@@ -30,6 +30,7 @@ pub mod error;
 pub mod git;
 pub mod healthcheck;
 pub mod loadbalancer;
+pub mod notifications;
 pub mod pool;
 pub mod process;
 pub mod proxy;

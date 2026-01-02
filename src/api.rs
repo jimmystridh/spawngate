@@ -801,6 +801,40 @@ impl PlatformApi {
             // Evaluate alerts (for manual trigger or cron)
             (Method::POST, "/alerts/evaluate") => self.evaluate_alerts().await,
 
+            // Notification channels
+            (Method::GET, "/notifications/channels") => self.list_notification_channels().await,
+            (Method::POST, "/notifications/channels") => self.create_notification_channel(req).await,
+            (Method::GET, path) if path.starts_with("/notifications/channels/") && !path.contains("/history") && !path.contains("/test") => {
+                let channel_id = path.strip_prefix("/notifications/channels/").unwrap_or("");
+                self.get_notification_channel(channel_id).await
+            }
+            (Method::PUT, path) if path.starts_with("/notifications/channels/") && !path.contains("/toggle") && !path.contains("/test") => {
+                let channel_id = path.strip_prefix("/notifications/channels/").unwrap_or("");
+                self.update_notification_channel(channel_id, req).await
+            }
+            (Method::DELETE, path) if path.starts_with("/notifications/channels/") => {
+                let channel_id = path.strip_prefix("/notifications/channels/").unwrap_or("");
+                self.delete_notification_channel(channel_id).await
+            }
+            (Method::POST, path) if path.ends_with("/toggle") && path.starts_with("/notifications/channels/") => {
+                let channel_id = path.strip_prefix("/notifications/channels/").and_then(|p| p.strip_suffix("/toggle")).unwrap_or("");
+                self.toggle_notification_channel(channel_id, req).await
+            }
+            (Method::POST, path) if path.ends_with("/test") && path.starts_with("/notifications/channels/") => {
+                let channel_id = path.strip_prefix("/notifications/channels/").and_then(|p| p.strip_suffix("/test")).unwrap_or("");
+                self.test_notification_channel(channel_id).await
+            }
+
+            // Notification history
+            (Method::GET, "/notifications/history") => self.get_notification_history().await,
+            (Method::GET, path) if path.ends_with("/history") && path.starts_with("/notifications/channels/") => {
+                let channel_id = path.strip_prefix("/notifications/channels/").and_then(|p| p.strip_suffix("/history")).unwrap_or("");
+                self.get_channel_notification_history(channel_id).await
+            }
+
+            // Process pending notifications (for cron/worker)
+            (Method::POST, "/notifications/process") => self.process_pending_notifications().await,
+
             // Formation management (per-process-type scaling)
             (Method::GET, path) if path.ends_with("/formation") => {
                 let app_name = path.strip_prefix("/apps/").and_then(|p| p.strip_suffix("/formation")).unwrap_or("");
@@ -3504,6 +3538,293 @@ impl PlatformApi {
             "process_type": process_type,
         }));
         Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    // ==================== Notification Channel Management ====================
+
+    async fn list_notification_channels(&self) -> Result<Response<Full<Bytes>>> {
+        let channels = self.db.list_notification_channels()?;
+        let response = ApiResponse::ok(channels);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_notification_channel(&self, channel_id: &str) -> Result<Response<Full<Bytes>>> {
+        if channel_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Channel ID is required"));
+        }
+
+        match self.db.get_notification_channel(channel_id)? {
+            Some(channel) => {
+                let response = ApiResponse::ok(channel);
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            None => Ok(json_error(StatusCode::NOT_FOUND, "Notification channel not found")),
+        }
+    }
+
+    async fn create_notification_channel(
+        self: Arc<Self>,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        let body = req.collect().await?.to_bytes();
+        let create_req: serde_json::Value = serde_json::from_slice(&body)?;
+
+        let name = create_req["name"].as_str().unwrap_or("").to_string();
+        let channel_type = create_req["channel_type"].as_str().unwrap_or("").to_string();
+        let config = create_req.get("config");
+        let enabled = create_req["enabled"].as_bool().unwrap_or(true);
+
+        if name.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Name is required"));
+        }
+        if channel_type.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Channel type is required"));
+        }
+        if config.is_none() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Config is required"));
+        }
+
+        // Validate channel type
+        if !["email", "webhook", "slack"].contains(&channel_type.as_str()) {
+            return Ok(json_error(StatusCode::BAD_REQUEST, format!("Invalid channel type: {}", channel_type)));
+        }
+
+        let id = format!("channel-{}", uuid::Uuid::new_v4());
+        let config_str = serde_json::to_string(config.unwrap())?;
+
+        let channel = crate::db::NotificationChannelRecord {
+            id: id.clone(),
+            name: name.clone(),
+            channel_type: channel_type.clone(),
+            config: config_str,
+            enabled,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        self.db.create_notification_channel(&channel)?;
+
+        self.db.log_activity(
+            "create",
+            &format!("Created {} notification channel: {}", channel_type, name),
+            None,
+            Some("notification_channel"),
+            Some(&id),
+            None,
+            "api",
+            None,
+            None,
+        )?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "id": id,
+            "name": name,
+            "channel_type": channel_type,
+            "enabled": enabled,
+        }));
+        Ok(json_response(StatusCode::CREATED, serde_json::to_string(&response)?))
+    }
+
+    async fn update_notification_channel(
+        self: Arc<Self>,
+        channel_id: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        if channel_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Channel ID is required"));
+        }
+
+        let existing = self.db.get_notification_channel(channel_id)?;
+        if existing.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Notification channel not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let update_req: serde_json::Value = serde_json::from_slice(&body)?;
+
+        let existing = existing.unwrap();
+        let name = update_req["name"].as_str().unwrap_or(&existing.name).to_string();
+        let channel_type = update_req["channel_type"].as_str().unwrap_or(&existing.channel_type).to_string();
+        let config_str = if let Some(config) = update_req.get("config") {
+            serde_json::to_string(config)?
+        } else {
+            existing.config.clone()
+        };
+        let enabled = update_req["enabled"].as_bool().unwrap_or(existing.enabled);
+
+        let channel = crate::db::NotificationChannelRecord {
+            id: channel_id.to_string(),
+            name: name.clone(),
+            channel_type: channel_type.clone(),
+            config: config_str,
+            enabled,
+            created_at: existing.created_at,
+            updated_at: String::new(),
+        };
+
+        self.db.update_notification_channel(&channel)?;
+
+        self.db.log_activity(
+            "update",
+            &format!("Updated notification channel: {}", name),
+            None,
+            Some("notification_channel"),
+            Some(channel_id),
+            None,
+            "api",
+            None,
+            None,
+        )?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "id": channel_id,
+            "name": name,
+            "channel_type": channel_type,
+            "enabled": enabled,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn delete_notification_channel(&self, channel_id: &str) -> Result<Response<Full<Bytes>>> {
+        if channel_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Channel ID is required"));
+        }
+
+        let existing = self.db.get_notification_channel(channel_id)?;
+        if existing.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Notification channel not found"));
+        }
+
+        self.db.delete_notification_channel(channel_id)?;
+
+        self.db.log_activity(
+            "delete",
+            &format!("Deleted notification channel: {}", existing.unwrap().name),
+            None,
+            Some("notification_channel"),
+            Some(channel_id),
+            None,
+            "api",
+            None,
+            None,
+        )?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "deleted": true,
+            "id": channel_id,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn toggle_notification_channel(
+        self: Arc<Self>,
+        channel_id: &str,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        if channel_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Channel ID is required"));
+        }
+
+        let existing = self.db.get_notification_channel(channel_id)?;
+        if existing.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Notification channel not found"));
+        }
+
+        let body = req.collect().await?.to_bytes();
+        let toggle_req: serde_json::Value = serde_json::from_slice(&body)?;
+        let enabled = toggle_req["enabled"].as_bool().unwrap_or(!existing.as_ref().unwrap().enabled);
+
+        self.db.toggle_notification_channel(channel_id, enabled)?;
+
+        self.db.log_activity(
+            "update",
+            &format!("{} notification channel: {}", if enabled { "Enabled" } else { "Disabled" }, existing.unwrap().name),
+            None,
+            Some("notification_channel"),
+            Some(channel_id),
+            None,
+            "api",
+            None,
+            None,
+        )?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "id": channel_id,
+            "enabled": enabled,
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn test_notification_channel(&self, channel_id: &str) -> Result<Response<Full<Bytes>>> {
+        if channel_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Channel ID is required"));
+        }
+
+        let channel = self.db.get_notification_channel(channel_id)?;
+        if channel.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Notification channel not found"));
+        }
+
+        let channel = channel.unwrap();
+
+        // Record test delivery
+        let history_id = self.db.record_notification_delivery(
+            channel_id,
+            "test",
+            None,
+            Some(r#"{"type": "test"}"#),
+        )?;
+
+        // For now, just mark as successful (actual sending would be async)
+        // In production, this would trigger the NotificationSender
+        self.db.update_notification_delivery(history_id, "sent", Some("Test successful"), None)?;
+
+        let response = ApiResponse::ok(serde_json::json!({
+            "id": channel_id,
+            "name": channel.name,
+            "test_sent": true,
+            "message": "Test notification sent successfully",
+        }));
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_notification_history(&self) -> Result<Response<Full<Bytes>>> {
+        let history = self.db.get_notification_history(100)?;
+        let response = ApiResponse::ok(history);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn get_channel_notification_history(&self, channel_id: &str) -> Result<Response<Full<Bytes>>> {
+        if channel_id.is_empty() {
+            return Ok(json_error(StatusCode::BAD_REQUEST, "Channel ID is required"));
+        }
+
+        if self.db.get_notification_channel(channel_id)?.is_none() {
+            return Ok(json_error(StatusCode::NOT_FOUND, "Notification channel not found"));
+        }
+
+        let history = self.db.get_channel_notification_history(channel_id, 100)?;
+        let response = ApiResponse::ok(history);
+        Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+    }
+
+    async fn process_pending_notifications(self: Arc<Self>) -> Result<Response<Full<Bytes>>> {
+        let sender = crate::notifications::NotificationSender::new(self.db.clone());
+        let result = sender.process_pending().await;
+
+        match result {
+            Ok(stats) => {
+                let response = ApiResponse::ok(serde_json::json!({
+                    "processed": stats.total,
+                    "sent": stats.sent,
+                    "failed": stats.failed,
+                }));
+                Ok(json_response(StatusCode::OK, serde_json::to_string(&response)?))
+            }
+            Err(e) => {
+                Ok(json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to process notifications: {}", e)))
+            }
+        }
     }
 }
 

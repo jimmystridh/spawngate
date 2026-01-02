@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -123,6 +123,10 @@ impl Database {
 
             if current_version < 10 {
                 self.migrate_v10(&conn)?;
+            }
+
+            if current_version < 11 {
+                self.migrate_v11(&conn)?;
             }
         }
 
@@ -577,6 +581,65 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (10);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v11: Notification channels configuration
+    fn migrate_v11(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v11: notification channels");
+
+        conn.execute_batch(r#"
+            -- Notification channels configuration
+            CREATE TABLE IF NOT EXISTS notification_channels (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                channel_type TEXT NOT NULL,
+                config TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Notification templates for customizing messages
+            CREATE TABLE IF NOT EXISTS notification_templates (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                subject_template TEXT,
+                body_template TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (channel_id) REFERENCES notification_channels(id) ON DELETE CASCADE
+            );
+
+            -- Notification delivery history
+            CREATE TABLE IF NOT EXISTS notification_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                recipient TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                payload TEXT,
+                response TEXT,
+                error_message TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                sent_at TEXT,
+                FOREIGN KEY (channel_id) REFERENCES notification_channels(id) ON DELETE CASCADE
+            );
+
+            -- Indexes
+            CREATE INDEX IF NOT EXISTS idx_notification_channels_type ON notification_channels(channel_type);
+            CREATE INDEX IF NOT EXISTS idx_notification_templates_channel ON notification_templates(channel_id);
+            CREATE INDEX IF NOT EXISTS idx_notification_templates_event ON notification_templates(event_type);
+            CREATE INDEX IF NOT EXISTS idx_notification_history_channel ON notification_history(channel_id);
+            CREATE INDEX IF NOT EXISTS idx_notification_history_status ON notification_history(status, created_at);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (11);
         "#)?;
 
         Ok(())
@@ -2407,6 +2470,212 @@ impl Database {
         }
         Ok(())
     }
+
+    // ==================== Notification Channel Operations ====================
+
+    pub fn create_notification_channel(&self, channel: &NotificationChannelRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO notification_channels (id, name, channel_type, config, enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![channel.id, channel.name, channel.channel_type, channel.config, channel.enabled],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_notification_channel(&self, id: &str) -> Result<Option<NotificationChannelRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, channel_type, config, enabled, created_at, updated_at
+             FROM notification_channels WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(NotificationChannelRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    channel_type: row.get(2)?,
+                    config: row.get(3)?,
+                    enabled: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to get notification channel")
+    }
+
+    pub fn list_notification_channels(&self) -> Result<Vec<NotificationChannelRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, channel_type, config, enabled, created_at, updated_at
+             FROM notification_channels ORDER BY name"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(NotificationChannelRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                channel_type: row.get(2)?,
+                config: row.get(3)?,
+                enabled: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+
+        let mut channels = Vec::new();
+        for row in rows {
+            channels.push(row?);
+        }
+        Ok(channels)
+    }
+
+    pub fn list_enabled_notification_channels(&self) -> Result<Vec<NotificationChannelRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, channel_type, config, enabled, created_at, updated_at
+             FROM notification_channels WHERE enabled = 1 ORDER BY name"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(NotificationChannelRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                channel_type: row.get(2)?,
+                config: row.get(3)?,
+                enabled: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+
+        let mut channels = Vec::new();
+        for row in rows {
+            channels.push(row?);
+        }
+        Ok(channels)
+    }
+
+    pub fn update_notification_channel(&self, channel: &NotificationChannelRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE notification_channels SET name = ?2, channel_type = ?3, config = ?4, enabled = ?5, updated_at = datetime('now')
+             WHERE id = ?1",
+            params![channel.id, channel.name, channel.channel_type, channel.config, channel.enabled],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_notification_channel(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM notification_channels WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn toggle_notification_channel(&self, id: &str, enabled: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE notification_channels SET enabled = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, enabled],
+        )?;
+        Ok(())
+    }
+
+    // ==================== Notification History Operations ====================
+
+    pub fn record_notification_delivery(
+        &self,
+        channel_id: &str,
+        event_type: &str,
+        recipient: Option<&str>,
+        payload: Option<&str>,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO notification_history (channel_id, event_type, recipient, payload, status)
+             VALUES (?1, ?2, ?3, ?4, 'pending')",
+            params![channel_id, event_type, recipient, payload],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn update_notification_delivery(
+        &self,
+        id: i64,
+        status: &str,
+        response: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE notification_history SET status = ?2, response = ?3, error_message = ?4,
+             attempts = attempts + 1, sent_at = CASE WHEN ?2 = 'sent' THEN datetime('now') ELSE sent_at END
+             WHERE id = ?1",
+            params![id, status, response, error_message],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_notification_history(&self, limit: usize) -> Result<Vec<NotificationHistoryRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, channel_id, event_type, recipient, status, payload, response, error_message, attempts, created_at, sent_at
+             FROM notification_history ORDER BY created_at DESC LIMIT ?1"
+        )?;
+
+        let rows = stmt.query_map([limit], |row| {
+            Ok(NotificationHistoryRecord {
+                id: row.get(0)?,
+                channel_id: row.get(1)?,
+                event_type: row.get(2)?,
+                recipient: row.get(3)?,
+                status: row.get(4)?,
+                payload: row.get(5)?,
+                response: row.get(6)?,
+                error_message: row.get(7)?,
+                attempts: row.get(8)?,
+                created_at: row.get(9)?,
+                sent_at: row.get(10)?,
+            })
+        })?;
+
+        let mut history = Vec::new();
+        for row in rows {
+            history.push(row?);
+        }
+        Ok(history)
+    }
+
+    pub fn get_channel_notification_history(&self, channel_id: &str, limit: usize) -> Result<Vec<NotificationHistoryRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, channel_id, event_type, recipient, status, payload, response, error_message, attempts, created_at, sent_at
+             FROM notification_history WHERE channel_id = ?1 ORDER BY created_at DESC LIMIT ?2"
+        )?;
+
+        let rows = stmt.query_map(params![channel_id, limit], |row| {
+            Ok(NotificationHistoryRecord {
+                id: row.get(0)?,
+                channel_id: row.get(1)?,
+                event_type: row.get(2)?,
+                recipient: row.get(3)?,
+                status: row.get(4)?,
+                payload: row.get(5)?,
+                response: row.get(6)?,
+                error_message: row.get(7)?,
+                attempts: row.get(8)?,
+                created_at: row.get(9)?,
+                sent_at: row.get(10)?,
+            })
+        })?;
+
+        let mut history = Vec::new();
+        for row in rows {
+            history.push(row?);
+        }
+        Ok(history)
+    }
 }
 
 // ==================== Record Types ====================
@@ -2680,6 +2949,34 @@ pub struct FormationRecord {
     pub command: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Notification channel configuration record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationChannelRecord {
+    pub id: String,
+    pub name: String,
+    pub channel_type: String,
+    pub config: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Notification delivery history record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationHistoryRecord {
+    pub id: i64,
+    pub channel_id: String,
+    pub event_type: String,
+    pub recipient: Option<String>,
+    pub status: String,
+    pub payload: Option<String>,
+    pub response: Option<String>,
+    pub error_message: Option<String>,
+    pub attempts: i32,
+    pub created_at: String,
+    pub sent_at: Option<String>,
 }
 
 #[cfg(test)]

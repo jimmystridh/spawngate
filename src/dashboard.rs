@@ -3384,6 +3384,360 @@ fn get_formation_css() -> &'static str {
 </style>"##
 }
 
+// ==================== Notification Settings UI ====================
+
+pub fn render_notifications_page(channels: &[serde_json::Value], history: &[serde_json::Value]) -> String {
+    let channels_html = render_notification_channels_list(channels);
+    let history_html = render_notification_history_list(history);
+
+    format!(
+        r##"<div class="notifications-page" x-data="{{ activeTab: 'channels', showCreateModal: false }}">
+    {css}
+    <div class="page-header">
+        <div class="header-left">
+            <h2>Notifications</h2>
+            <span class="badge">{channel_count} channels</span>
+        </div>
+        <div class="header-actions">
+            <button class="btn btn-primary" @click="showCreateModal = true">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                </svg>
+                Add Channel
+            </button>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <button class="tab" :class="{{ 'active': activeTab === 'channels' }}" @click="activeTab = 'channels'">
+            Channels
+        </button>
+        <button class="tab" :class="{{ 'active': activeTab === 'history' }}" @click="activeTab = 'history'">
+            History
+        </button>
+    </div>
+
+    <div x-show="activeTab === 'channels'" class="tab-content" hx-trigger="reload from:body" hx-get="/dashboard/notifications" hx-swap="innerHTML">
+        {channels_html}
+    </div>
+
+    <div x-show="activeTab === 'history'" class="tab-content">
+        {history_html}
+    </div>
+
+    {create_modal}
+</div>"##,
+        css = get_notifications_css(),
+        channel_count = channels.len(),
+        channels_html = channels_html,
+        history_html = history_html,
+        create_modal = get_create_channel_modal()
+    )
+}
+
+fn render_notification_channels_list(channels: &[serde_json::Value]) -> String {
+    if channels.is_empty() {
+        return r#"<div class="empty-state">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+            </svg>
+            <h3>No notification channels</h3>
+            <p>Add a channel to receive alerts via email, webhook, or Slack</p>
+        </div>"#.to_string();
+    }
+
+    let items: Vec<String> = channels.iter().map(|channel| {
+        let id = channel["id"].as_str().unwrap_or("");
+        let name = channel["name"].as_str().unwrap_or("Unknown");
+        let channel_type = channel["channel_type"].as_str().unwrap_or("unknown");
+        let enabled = channel["enabled"].as_bool().unwrap_or(false);
+
+        let type_icon = match channel_type {
+            "email" => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>"#,
+            "webhook" => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>"#,
+            "slack" => r#"<svg fill="currentColor" viewBox="0 0 24 24" width="20" height="20"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>"#,
+            _ => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>"#,
+        };
+
+        let status_class = if enabled { "status-enabled" } else { "status-disabled" };
+        let status_text = if enabled { "Enabled" } else { "Disabled" };
+
+        format!(
+            r##"<div class="channel-card {status_class}">
+    <div class="channel-header">
+        <div class="channel-info">
+            <span class="channel-icon">{type_icon}</span>
+            <div class="channel-details">
+                <h4>{name}</h4>
+                <span class="channel-type">{channel_type}</span>
+            </div>
+        </div>
+        <div class="channel-actions">
+            <label class="toggle-switch">
+                <input type="checkbox" {checked}
+                    hx-post="/notifications/channels/{id}/toggle"
+                    hx-vals='js:{{enabled: !this.checked}}'
+                    hx-swap="none"
+                    hx-on::after-request="htmx.trigger(document.body, 'reload')">
+                <span class="toggle-slider"></span>
+            </label>
+            <button class="btn btn-icon btn-sm"
+                hx-post="/notifications/channels/{id}/test"
+                hx-swap="none"
+                hx-on::after-request="showToast('Test notification sent', 'success')"
+                title="Send test notification">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+            </button>
+            <button class="btn btn-icon btn-sm btn-danger"
+                hx-delete="/notifications/channels/{id}"
+                hx-confirm="Delete this notification channel?"
+                hx-swap="none"
+                hx-on::after-request="htmx.trigger(document.body, 'reload')"
+                title="Delete channel">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+    <div class="channel-status">
+        <span class="status-badge {status_class}">{status_text}</span>
+    </div>
+</div>"##,
+            status_class = status_class,
+            type_icon = type_icon,
+            name = name,
+            channel_type = channel_type,
+            checked = if enabled { "checked" } else { "" },
+            id = id,
+            status_text = status_text
+        )
+    }).collect();
+
+    format!(r#"<div class="channels-list">{}</div>"#, items.join("\n"))
+}
+
+fn render_notification_history_list(history: &[serde_json::Value]) -> String {
+    if history.is_empty() {
+        return r#"<div class="empty-state">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+            </svg>
+            <h3>No notification history</h3>
+            <p>Notification deliveries will appear here</p>
+        </div>"#.to_string();
+    }
+
+    let items: Vec<String> = history.iter().map(|entry| {
+        let event_type = entry["event_type"].as_str().unwrap_or("unknown");
+        let status = entry["status"].as_str().unwrap_or("unknown");
+        let created_at = entry["created_at"].as_str().unwrap_or("");
+        let error_message = entry["error_message"].as_str();
+
+        let status_class = match status {
+            "sent" => "status-success",
+            "failed" => "status-failed",
+            "pending" => "status-pending",
+            _ => "status-unknown",
+        };
+
+        let status_icon = match status {
+            "sent" => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"#,
+            "failed" => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"#,
+            "pending" => r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"#,
+            _ => "",
+        };
+
+        let error_html = error_message.map(|e| format!(r#"<div class="error-message">{}</div>"#, e)).unwrap_or_default();
+
+        format!(
+            r##"<div class="history-item {status_class}">
+    <div class="history-icon">{status_icon}</div>
+    <div class="history-content">
+        <div class="history-header">
+            <span class="event-type">{event_type}</span>
+            <span class="history-status">{status}</span>
+        </div>
+        <div class="history-time">{created_at}</div>
+        {error_html}
+    </div>
+</div>"##,
+            status_class = status_class,
+            status_icon = status_icon,
+            event_type = event_type,
+            status = status,
+            created_at = format_relative_time(created_at),
+            error_html = error_html
+        )
+    }).collect();
+
+    format!(r#"<div class="history-list">{}</div>"#, items.join("\n"))
+}
+
+fn get_create_channel_modal() -> &'static str {
+    r##"<div x-show="showCreateModal" class="modal-backdrop" @click.self="showCreateModal = false">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>Add Notification Channel</h3>
+            <button class="btn btn-icon" @click="showCreateModal = false">&times;</button>
+        </div>
+        <form x-data="{ channelType: 'email' }"
+            hx-post="/notifications/channels"
+            hx-swap="none"
+            @htmx:after-request="showCreateModal = false; htmx.trigger(document.body, 'reload')">
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Name *</label>
+                    <input type="text" name="name" class="input" required placeholder="Production Alerts">
+                </div>
+                <div class="form-group">
+                    <label>Channel Type *</label>
+                    <select name="channel_type" class="input" x-model="channelType" required>
+                        <option value="email">Email</option>
+                        <option value="webhook">Webhook</option>
+                        <option value="slack">Slack</option>
+                    </select>
+                </div>
+
+                <!-- Email config -->
+                <template x-if="channelType === 'email'">
+                    <div class="config-fields">
+                        <div class="form-group">
+                            <label>SMTP Host *</label>
+                            <input type="text" name="config.smtp_host" class="input" placeholder="smtp.example.com">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>SMTP Port</label>
+                                <input type="number" name="config.smtp_port" class="input" value="587">
+                            </div>
+                            <div class="form-group">
+                                <label>Use TLS</label>
+                                <select name="config.smtp_tls" class="input">
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>From Address *</label>
+                            <input type="email" name="config.from_address" class="input" placeholder="alerts@example.com">
+                        </div>
+                        <div class="form-group">
+                            <label>To Addresses * (comma-separated)</label>
+                            <input type="text" name="config.to_addresses" class="input" placeholder="team@example.com, oncall@example.com">
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Webhook config -->
+                <template x-if="channelType === 'webhook'">
+                    <div class="config-fields">
+                        <div class="form-group">
+                            <label>Webhook URL *</label>
+                            <input type="url" name="config.url" class="input" placeholder="https://example.com/webhook">
+                        </div>
+                        <div class="form-group">
+                            <label>Secret (optional)</label>
+                            <input type="text" name="config.secret" class="input" placeholder="HMAC signing secret">
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Slack config -->
+                <template x-if="channelType === 'slack'">
+                    <div class="config-fields">
+                        <div class="form-group">
+                            <label>Webhook URL *</label>
+                            <input type="url" name="config.webhook_url" class="input" placeholder="https://hooks.slack.com/services/...">
+                        </div>
+                        <div class="form-group">
+                            <label>Channel (optional)</label>
+                            <input type="text" name="config.channel" class="input" placeholder="#alerts">
+                        </div>
+                    </div>
+                </template>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline" @click="showCreateModal = false">Cancel</button>
+                <button type="submit" class="btn btn-primary">Add Channel</button>
+            </div>
+        </form>
+    </div>
+</div>"##
+}
+
+fn get_notifications_css() -> &'static str {
+    r##"<style>
+.notifications-page { padding: 20px; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-left h2 { margin: 0; }
+.tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.tab { padding: 8px 16px; border: none; background: none; cursor: pointer; border-radius: 4px 4px 0 0; color: var(--text-muted); }
+.tab.active { background: var(--primary); color: white; }
+.tab:hover:not(.active) { background: var(--bg-hover); }
+
+.channels-list { display: flex; flex-direction: column; gap: 12px; }
+
+.channel-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.channel-card.status-disabled { opacity: 0.7; }
+.channel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.channel-info { display: flex; align-items: center; gap: 12px; }
+.channel-icon { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; background: var(--primary-light, #e0f2fe); border-radius: 8px; color: var(--primary); }
+.channel-details h4 { margin: 0; }
+.channel-type { font-size: 0.85em; color: var(--text-muted); text-transform: capitalize; }
+.channel-actions { display: flex; gap: 8px; align-items: center; }
+.channel-status { display: flex; gap: 8px; }
+
+.status-badge { font-size: 0.8em; padding: 2px 8px; border-radius: 4px; }
+.status-badge.status-enabled { background: #dcfce7; color: #16a34a; }
+.status-badge.status-disabled { background: #f3f4f6; color: #6b7280; }
+
+.toggle-switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .3s; border-radius: 22px; }
+.toggle-slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
+input:checked + .toggle-slider { background-color: var(--primary); }
+input:checked + .toggle-slider:before { transform: translateX(18px); }
+
+.history-list { display: flex; flex-direction: column; gap: 8px; }
+.history-item { display: flex; gap: 12px; padding: 12px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; }
+.history-item.status-success { border-left: 4px solid #22c55e; }
+.history-item.status-failed { border-left: 4px solid #ef4444; }
+.history-item.status-pending { border-left: 4px solid #f59e0b; }
+.history-icon { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
+.status-success .history-icon { background: #f0fdf4; color: #22c55e; }
+.status-failed .history-icon { background: #fef2f2; color: #ef4444; }
+.status-pending .history-icon { background: #fffbeb; color: #f59e0b; }
+.history-content { flex: 1; }
+.history-header { display: flex; justify-content: space-between; align-items: center; }
+.event-type { font-weight: 500; }
+.history-status { font-size: 0.85em; text-transform: capitalize; }
+.history-time { font-size: 0.85em; color: var(--text-muted); }
+.error-message { margin-top: 8px; padding: 8px; background: #fef2f2; color: #b91c1c; border-radius: 4px; font-size: 0.85em; }
+
+.modal-backdrop { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: var(--card-bg); border-radius: 12px; width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.modal-header h3 { margin: 0; }
+.modal-body { padding: 20px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--border); }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; margin-bottom: 6px; font-weight: 500; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.config-fields { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 16px; }
+
+.empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+.empty-state svg { margin-bottom: 16px; opacity: 0.5; }
+.empty-state h3 { margin: 0 0 8px 0; color: var(--text); }
+.empty-state p { margin: 0; }
+</style>"##
+}
+
 fn format_relative_time(timestamp: &str) -> String {
     // Parse timestamp and return relative time
     // For now, just return the timestamp; in a real impl, use chrono

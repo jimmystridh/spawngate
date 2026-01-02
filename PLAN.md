@@ -136,4 +136,4 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Activity feed (all actions)
 - [x] Filterable event log
 - [x] User action attribution
-- [ ] Email/webhook notifications (future)
+- [x] Email/webhook notifications

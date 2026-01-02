@@ -10,7 +10,8 @@
 
 use spawngate::db::{
     AddonRecord, ApiTokenRecord, AppRecord, Database, DeploymentRecord,
-    FormationRecord, ProcessRecord, WebhookEventRecord, WebhookRecord,
+    FormationRecord, NotificationChannelRecord, NotificationHistoryRecord,
+    ProcessRecord, WebhookEventRecord, WebhookRecord,
 };
 use tempfile::TempDir;
 
@@ -2029,5 +2030,273 @@ mod formation_tests {
         assert_eq!(app2_formations.len(), 1);
         assert_eq!(app1_formations[0].quantity, 10);
         assert_eq!(app2_formations[0].quantity, 1);
+    }
+}
+
+// ============================================================================
+// Notification Channel Tests
+// ============================================================================
+
+mod notification_tests {
+    use super::*;
+
+    fn create_test_channel(id: &str, channel_type: &str) -> NotificationChannelRecord {
+        NotificationChannelRecord {
+            id: id.to_string(),
+            name: format!("{} Channel", channel_type),
+            channel_type: channel_type.to_string(),
+            config: r#"{"url": "https://example.com/webhook"}"#.to_string(),
+            enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_create_and_get_notification_channel() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-1", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        let retrieved = db.get_notification_channel("channel-1").unwrap();
+        assert!(retrieved.is_some());
+        let c = retrieved.unwrap();
+        assert_eq!(c.id, "channel-1");
+        assert_eq!(c.channel_type, "webhook");
+        assert!(c.enabled);
+    }
+
+    #[test]
+    fn test_get_notification_channel_not_found() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = db.get_notification_channel("nonexistent").unwrap();
+        assert!(channel.is_none());
+    }
+
+    #[test]
+    fn test_list_notification_channels() {
+        let (db, _tmp) = create_test_db();
+
+        let email = create_test_channel("channel-email", "email");
+        let webhook = create_test_channel("channel-webhook", "webhook");
+        let slack = create_test_channel("channel-slack", "slack");
+
+        db.create_notification_channel(&email).unwrap();
+        db.create_notification_channel(&webhook).unwrap();
+        db.create_notification_channel(&slack).unwrap();
+
+        let channels = db.list_notification_channels().unwrap();
+        assert_eq!(channels.len(), 3);
+    }
+
+    #[test]
+    fn test_list_enabled_notification_channels() {
+        let (db, _tmp) = create_test_db();
+
+        let enabled = NotificationChannelRecord {
+            id: "channel-enabled".to_string(),
+            name: "Enabled Channel".to_string(),
+            channel_type: "webhook".to_string(),
+            config: "{}".to_string(),
+            enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let disabled = NotificationChannelRecord {
+            id: "channel-disabled".to_string(),
+            name: "Disabled Channel".to_string(),
+            channel_type: "email".to_string(),
+            config: "{}".to_string(),
+            enabled: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        db.create_notification_channel(&enabled).unwrap();
+        db.create_notification_channel(&disabled).unwrap();
+
+        let enabled_channels = db.list_enabled_notification_channels().unwrap();
+        assert_eq!(enabled_channels.len(), 1);
+        assert_eq!(enabled_channels[0].id, "channel-enabled");
+    }
+
+    #[test]
+    fn test_update_notification_channel() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-update", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        let updated = NotificationChannelRecord {
+            id: "channel-update".to_string(),
+            name: "Updated Channel Name".to_string(),
+            channel_type: "slack".to_string(),
+            config: r#"{"webhook_url": "https://hooks.slack.com/..."}"#.to_string(),
+            enabled: false,
+            created_at: channel.created_at.clone(),
+            updated_at: String::new(),
+        };
+
+        db.update_notification_channel(&updated).unwrap();
+
+        let retrieved = db.get_notification_channel("channel-update").unwrap().unwrap();
+        assert_eq!(retrieved.name, "Updated Channel Name");
+        assert_eq!(retrieved.channel_type, "slack");
+        assert!(!retrieved.enabled);
+    }
+
+    #[test]
+    fn test_delete_notification_channel() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-delete", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        let exists = db.get_notification_channel("channel-delete").unwrap();
+        assert!(exists.is_some());
+
+        db.delete_notification_channel("channel-delete").unwrap();
+
+        let deleted = db.get_notification_channel("channel-delete").unwrap();
+        assert!(deleted.is_none());
+    }
+
+    #[test]
+    fn test_toggle_notification_channel() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-toggle", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        // Initially enabled
+        let c = db.get_notification_channel("channel-toggle").unwrap().unwrap();
+        assert!(c.enabled);
+
+        // Toggle off
+        db.toggle_notification_channel("channel-toggle", false).unwrap();
+        let c = db.get_notification_channel("channel-toggle").unwrap().unwrap();
+        assert!(!c.enabled);
+
+        // Toggle on
+        db.toggle_notification_channel("channel-toggle", true).unwrap();
+        let c = db.get_notification_channel("channel-toggle").unwrap().unwrap();
+        assert!(c.enabled);
+    }
+
+    #[test]
+    fn test_record_notification_delivery() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-history", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        let history_id = db.record_notification_delivery(
+            "channel-history",
+            "alert.firing",
+            Some("https://example.com"),
+            Some(r#"{"alert": "High CPU"}"#),
+        ).unwrap();
+
+        assert!(history_id > 0);
+
+        let history = db.get_notification_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].channel_id, "channel-history");
+        assert_eq!(history[0].event_type, "alert.firing");
+        assert_eq!(history[0].status, "pending");
+    }
+
+    #[test]
+    fn test_update_notification_delivery() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-update-history", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        let history_id = db.record_notification_delivery(
+            "channel-update-history",
+            "test",
+            None,
+            None,
+        ).unwrap();
+
+        // Update to sent
+        db.update_notification_delivery(history_id, "sent", Some("200 OK"), None).unwrap();
+
+        let history = db.get_notification_history(10).unwrap();
+        assert_eq!(history[0].status, "sent");
+        assert_eq!(history[0].response, Some("200 OK".to_string()));
+        assert_eq!(history[0].attempts, 1);
+    }
+
+    #[test]
+    fn test_update_notification_delivery_failed() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-failed", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        let history_id = db.record_notification_delivery(
+            "channel-failed",
+            "alert.firing",
+            None,
+            None,
+        ).unwrap();
+
+        // Update to failed
+        db.update_notification_delivery(history_id, "failed", None, Some("Connection refused")).unwrap();
+
+        let history = db.get_notification_history(10).unwrap();
+        assert_eq!(history[0].status, "failed");
+        assert_eq!(history[0].error_message, Some("Connection refused".to_string()));
+    }
+
+    #[test]
+    fn test_get_channel_notification_history() {
+        let (db, _tmp) = create_test_db();
+
+        let channel1 = create_test_channel("channel-a", "webhook");
+        let channel2 = create_test_channel("channel-b", "email");
+        db.create_notification_channel(&channel1).unwrap();
+        db.create_notification_channel(&channel2).unwrap();
+
+        // Create history for both channels
+        db.record_notification_delivery("channel-a", "event1", None, None).unwrap();
+        db.record_notification_delivery("channel-a", "event2", None, None).unwrap();
+        db.record_notification_delivery("channel-b", "event3", None, None).unwrap();
+
+        let channel_a_history = db.get_channel_notification_history("channel-a", 10).unwrap();
+        let channel_b_history = db.get_channel_notification_history("channel-b", 10).unwrap();
+
+        assert_eq!(channel_a_history.len(), 2);
+        assert_eq!(channel_b_history.len(), 1);
+    }
+
+    #[test]
+    fn test_notification_history_limit() {
+        let (db, _tmp) = create_test_db();
+
+        let channel = create_test_channel("channel-limit", "webhook");
+        db.create_notification_channel(&channel).unwrap();
+
+        // Create 10 history entries
+        for i in 0..10 {
+            db.record_notification_delivery(
+                "channel-limit",
+                &format!("event-{}", i),
+                None,
+                None,
+            ).unwrap();
+        }
+
+        // Get with limit
+        let limited = db.get_notification_history(5).unwrap();
+        assert_eq!(limited.len(), 5);
+
+        let all = db.get_notification_history(100).unwrap();
+        assert_eq!(all.len(), 10);
     }
 }
