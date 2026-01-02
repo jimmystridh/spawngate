@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 /// Current schema version for migrations
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 /// Database connection wrapper with thread-safe access
 pub struct Database {
@@ -111,6 +111,10 @@ impl Database {
 
             if current_version < 7 {
                 self.migrate_v7(&conn)?;
+            }
+
+            if current_version < 8 {
+                self.migrate_v8(&conn)?;
             }
         }
 
@@ -438,6 +442,39 @@ impl Database {
 
             -- Record migration
             INSERT INTO schema_migrations (version) VALUES (7);
+        "#)?;
+
+        Ok(())
+    }
+
+    /// Migration v8: Activity events
+    fn migrate_v8(&self, conn: &Connection) -> Result<()> {
+        debug!("Applying migration v8: activity events");
+
+        conn.execute_batch(r#"
+            -- Activity events for tracking all platform actions
+            CREATE TABLE IF NOT EXISTS activity_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                action TEXT NOT NULL,
+                app_name TEXT,
+                resource_type TEXT,
+                resource_id TEXT,
+                actor TEXT,
+                actor_type TEXT DEFAULT 'user',
+                details TEXT,
+                ip_address TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Indices for efficient activity queries
+            CREATE INDEX IF NOT EXISTS idx_activity_events_time ON activity_events(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_activity_events_app ON activity_events(app_name, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_activity_events_type ON activity_events(event_type, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_activity_events_actor ON activity_events(actor, created_at DESC);
+
+            -- Record migration
+            INSERT INTO schema_migrations (version) VALUES (8);
         "#)?;
 
         Ok(())
@@ -1624,6 +1661,159 @@ impl Database {
 
         Ok((request_deleted, resource_deleted))
     }
+
+    // ==================== Activity Operations ====================
+
+    /// Log an activity event
+    pub fn log_activity(
+        &self,
+        event_type: &str,
+        action: &str,
+        app_name: Option<&str>,
+        resource_type: Option<&str>,
+        resource_id: Option<&str>,
+        actor: Option<&str>,
+        actor_type: &str,
+        details: Option<&str>,
+        ip_address: Option<&str>,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO activity_events (event_type, action, app_name, resource_type, resource_id, actor, actor_type, details, ip_address)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![event_type, action, app_name, resource_type, resource_id, actor, actor_type, details, ip_address],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Get activity events for an app
+    pub fn get_app_activity(&self, app_name: &str, limit: usize) -> Result<Vec<ActivityEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, event_type, action, app_name, resource_type, resource_id, actor, actor_type, details, ip_address, created_at
+             FROM activity_events WHERE app_name = ?1 ORDER BY created_at DESC LIMIT ?2"
+        )?;
+
+        let records = stmt.query_map(params![app_name, limit as i64], |row| {
+            Ok(ActivityEventRecord {
+                id: row.get(0)?,
+                event_type: row.get(1)?,
+                action: row.get(2)?,
+                app_name: row.get(3)?,
+                resource_type: row.get(4)?,
+                resource_id: row.get(5)?,
+                actor: row.get(6)?,
+                actor_type: row.get(7)?,
+                details: row.get(8)?,
+                ip_address: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Get all activity events (platform-wide)
+    pub fn get_all_activity(&self, limit: usize) -> Result<Vec<ActivityEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, event_type, action, app_name, resource_type, resource_id, actor, actor_type, details, ip_address, created_at
+             FROM activity_events ORDER BY created_at DESC LIMIT ?1"
+        )?;
+
+        let records = stmt.query_map(params![limit as i64], |row| {
+            Ok(ActivityEventRecord {
+                id: row.get(0)?,
+                event_type: row.get(1)?,
+                action: row.get(2)?,
+                app_name: row.get(3)?,
+                resource_type: row.get(4)?,
+                resource_id: row.get(5)?,
+                actor: row.get(6)?,
+                actor_type: row.get(7)?,
+                details: row.get(8)?,
+                ip_address: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Get filtered activity events
+    pub fn get_filtered_activity(
+        &self,
+        app_name: Option<&str>,
+        event_type: Option<&str>,
+        actor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ActivityEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT id, event_type, action, app_name, resource_type, resource_id, actor, actor_type, details, ip_address, created_at
+             FROM activity_events WHERE 1=1"
+        );
+
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut param_idx = 1;
+
+        if let Some(app) = app_name {
+            sql.push_str(&format!(" AND app_name = ?{}", param_idx));
+            params_vec.push(Box::new(app.to_string()));
+            param_idx += 1;
+        }
+
+        if let Some(et) = event_type {
+            sql.push_str(&format!(" AND event_type = ?{}", param_idx));
+            params_vec.push(Box::new(et.to_string()));
+            param_idx += 1;
+        }
+
+        if let Some(a) = actor {
+            sql.push_str(&format!(" AND actor = ?{}", param_idx));
+            params_vec.push(Box::new(a.to_string()));
+            param_idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{}", param_idx));
+        params_vec.push(Box::new(limit as i64));
+
+        let params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let records = stmt.query_map(params.as_slice(), |row| {
+            Ok(ActivityEventRecord {
+                id: row.get(0)?,
+                event_type: row.get(1)?,
+                action: row.get(2)?,
+                app_name: row.get(3)?,
+                resource_type: row.get(4)?,
+                resource_id: row.get(5)?,
+                actor: row.get(6)?,
+                actor_type: row.get(7)?,
+                details: row.get(8)?,
+                ip_address: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(records)
+    }
+
+    /// Cleanup old activity events (keep last N days)
+    pub fn cleanup_old_activity(&self, days: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = format!("datetime('now', '-{} days')", days);
+        let deleted = conn.execute(
+            &format!("DELETE FROM activity_events WHERE created_at < {}", cutoff),
+            [],
+        )?;
+        Ok(deleted)
+    }
 }
 
 // ==================== Record Types ====================
@@ -1823,6 +2013,22 @@ pub struct ResourceMetricsRecord {
     pub cpu_percent: f64,
     pub memory_used: i64,
     pub memory_limit: i64,
+}
+
+/// Activity event record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEventRecord {
+    pub id: i64,
+    pub event_type: String,
+    pub action: String,
+    pub app_name: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub actor: Option<String>,
+    pub actor_type: String,
+    pub details: Option<String>,
+    pub ip_address: Option<String>,
+    pub created_at: String,
 }
 
 #[cfg(test)]

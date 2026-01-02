@@ -2530,6 +2530,270 @@ fn render_process_type_card(app_name: &str, process_type: &str, instances: &[&se
     )
 }
 
+/// Render activity feed for an app (compact version)
+pub fn render_activity_feed(events: &[serde_json::Value]) -> String {
+    if events.is_empty() {
+        return r#"<div class="empty-state small">
+            <p>No recent activity</p>
+        </div>"#.to_string();
+    }
+
+    let items: Vec<String> = events.iter().map(|event| {
+        let event_type = event["event_type"].as_str().unwrap_or("unknown");
+        let action = event["action"].as_str().unwrap_or("unknown");
+        let actor = event["actor"].as_str().unwrap_or("system");
+        let actor_type = event["actor_type"].as_str().unwrap_or("system");
+        let details = event["details"].as_str().unwrap_or("");
+        let created_at = event["created_at"].as_str().unwrap_or("");
+
+        let (icon, icon_class) = get_activity_icon(event_type);
+        let actor_badge = if actor_type == "system" {
+            r#"<span class="actor-badge actor-system">system</span>"#.to_string()
+        } else {
+            format!(r#"<span class="actor-badge actor-user">{}</span>"#, actor)
+        };
+
+        format!(
+            r##"<div class="activity-item">
+    <div class="activity-icon {1}">
+        {0}
+    </div>
+    <div class="activity-content">
+        <div class="activity-header">
+            <span class="activity-action">{2}</span>
+            {3}
+        </div>
+        <div class="activity-details" x-show="{4}">{5}</div>
+        <div class="activity-time">{6}</div>
+    </div>
+</div>"##,
+            icon, icon_class, action, actor_badge,
+            !details.is_empty(), details, format_relative_time(created_at)
+        )
+    }).collect();
+
+    format!(r#"<div class="activity-feed">{}</div>"#, items.join(""))
+}
+
+/// Render full activity page with filters
+pub fn render_activity_page(events: &[serde_json::Value]) -> String {
+    let items: Vec<String> = events.iter().map(|event| {
+        let event_type = event["event_type"].as_str().unwrap_or("unknown");
+        let action = event["action"].as_str().unwrap_or("unknown");
+        let app_name = event["app_name"].as_str();
+        let resource_type = event["resource_type"].as_str().unwrap_or("");
+        let resource_id = event["resource_id"].as_str().unwrap_or("");
+        let actor = event["actor"].as_str().unwrap_or("system");
+        let actor_type = event["actor_type"].as_str().unwrap_or("system");
+        let details = event["details"].as_str().unwrap_or("");
+        let created_at = event["created_at"].as_str().unwrap_or("");
+
+        let (icon, icon_class) = get_activity_icon(event_type);
+
+        let actor_badge = if actor_type == "system" {
+            r#"<span class="actor-badge actor-system">system</span>"#.to_string()
+        } else {
+            format!(r#"<span class="actor-badge actor-user">{}</span>"#, actor)
+        };
+
+        let app_link = if let Some(app) = app_name {
+            format!(r#"<a href="/dashboard/apps/{0}" class="activity-app-link">{0}</a>"#, app)
+        } else {
+            String::new()
+        };
+
+        let resource_info = if !resource_type.is_empty() && !resource_id.is_empty() {
+            format!(r#"<span class="activity-resource">{}: {}</span>"#, resource_type, resource_id)
+        } else {
+            String::new()
+        };
+
+        format!(
+            r##"<div class="activity-row">
+    <div class="activity-icon-lg {1}">
+        {0}
+    </div>
+    <div class="activity-info">
+        <div class="activity-main">
+            <span class="activity-action-lg">{2}</span>
+            {3}
+            {4}
+            {5}
+        </div>
+        <div class="activity-details-lg" x-show="{6}">{7}</div>
+    </div>
+    <div class="activity-meta">
+        <div class="activity-time-lg">{8}</div>
+        <div class="activity-type-badge {9}">{10}</div>
+    </div>
+</div>"##,
+            icon, icon_class, action, actor_badge, app_link, resource_info,
+            !details.is_empty(), details, format_relative_time(created_at),
+            get_event_type_class(event_type), event_type
+        )
+    }).collect();
+
+    let empty_state = if events.is_empty() {
+        r##"<div class="empty-state">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="64" height="64">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <h3>No activity yet</h3>
+            <p>Activity will appear here as you use the platform</p>
+        </div>"##.to_string()
+    } else {
+        String::new()
+    };
+
+    format!(
+        r##"<div class="activity-page" x-data="{{
+    filter: 'all',
+    search: '',
+    showFilters: false
+}}">
+    <div class="activity-header">
+        <h2>Activity Log</h2>
+        <div class="activity-controls">
+            <div class="search-box">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                <input type="text" placeholder="Search activity..." x-model="search" class="input input-sm">
+            </div>
+            <div class="filter-buttons">
+                <button class="btn btn-sm" :class="{{'btn-primary': filter === 'all'}}" @click="filter = 'all'">All</button>
+                <button class="btn btn-sm" :class="{{'btn-primary': filter === 'deploy'}}" @click="filter = 'deploy'">Deploys</button>
+                <button class="btn btn-sm" :class="{{'btn-primary': filter === 'config'}}" @click="filter = 'config'">Config</button>
+                <button class="btn btn-sm" :class="{{'btn-primary': filter === 'scale'}}" @click="filter = 'scale'">Scaling</button>
+            </div>
+            <button class="btn btn-icon btn-sm" @click="htmx.trigger('#activity-list', 'reload')" title="Refresh">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+    <div class="activity-list" id="activity-list" hx-get="/dashboard/activity" hx-trigger="reload from:body" hx-swap="innerHTML">
+        {0}
+        {1}
+    </div>
+</div>"##,
+        items.join(""), empty_state
+    )
+}
+
+fn get_activity_icon(event_type: &str) -> (&'static str, &'static str) {
+    match event_type {
+        "deploy" | "deployment" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>"#,
+            "icon-deploy"
+        ),
+        "config" | "config_change" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>"#,
+            "icon-config"
+        ),
+        "scale" | "scaling" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>"#,
+            "icon-scale"
+        ),
+        "restart" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>"#,
+            "icon-restart"
+        ),
+        "addon" | "addon_provision" | "addon_deprovision" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"/></svg>"#,
+            "icon-addon"
+        ),
+        "domain" | "domain_add" | "domain_remove" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>"#,
+            "icon-domain"
+        ),
+        "secret" | "secret_access" | "secret_update" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>"#,
+            "icon-secret"
+        ),
+        "app_create" | "app_delete" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>"#,
+            "icon-app"
+        ),
+        "webhook" => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>"#,
+            "icon-webhook"
+        ),
+        _ => (
+            r#"<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>"#,
+            "icon-default"
+        ),
+    }
+}
+
+fn get_event_type_class(event_type: &str) -> &'static str {
+    match event_type {
+        "deploy" | "deployment" => "type-deploy",
+        "config" | "config_change" => "type-config",
+        "scale" | "scaling" => "type-scale",
+        "restart" => "type-restart",
+        "addon" | "addon_provision" | "addon_deprovision" => "type-addon",
+        "domain" | "domain_add" | "domain_remove" => "type-domain",
+        "secret" | "secret_access" | "secret_update" => "type-secret",
+        "app_create" | "app_delete" => "type-app",
+        "webhook" => "type-webhook",
+        _ => "type-default",
+    }
+}
+
+fn format_relative_time(timestamp: &str) -> String {
+    // Parse timestamp and return relative time
+    // For now, just return the timestamp; in a real impl, use chrono
+    if timestamp.is_empty() {
+        return "just now".to_string();
+    }
+
+    // Try to parse as ISO datetime
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+        let now = chrono::Utc::now();
+        let diff = now.signed_duration_since(dt);
+
+        if diff.num_seconds() < 60 {
+            return "just now".to_string();
+        } else if diff.num_minutes() < 60 {
+            let mins = diff.num_minutes();
+            return format!("{}m ago", mins);
+        } else if diff.num_hours() < 24 {
+            let hours = diff.num_hours();
+            return format!("{}h ago", hours);
+        } else if diff.num_days() < 7 {
+            let days = diff.num_days();
+            return format!("{}d ago", days);
+        } else {
+            return dt.format("%b %d").to_string();
+        }
+    }
+
+    // Try SQLite datetime format (YYYY-MM-DD HH:MM:SS)
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S") {
+        let now = chrono::Utc::now().naive_utc();
+        let diff = now.signed_duration_since(dt);
+
+        if diff.num_seconds() < 60 {
+            return "just now".to_string();
+        } else if diff.num_minutes() < 60 {
+            let mins = diff.num_minutes();
+            return format!("{}m ago", mins);
+        } else if diff.num_hours() < 24 {
+            let hours = diff.num_hours();
+            return format!("{}h ago", hours);
+        } else if diff.num_days() < 7 {
+            let days = diff.num_days();
+            return format!("{}d ago", days);
+        } else {
+            return dt.format("%b %d").to_string();
+        }
+    }
+
+    timestamp.to_string()
+}
+
 const LOGIN_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7979,6 +8243,251 @@ body {
     font-weight: 500;
     color: var(--text-primary);
 }
+
+/* Activity Feed Styles */
+.activity-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.activity-item {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+}
+
+.activity-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 0.375rem;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.activity-icon.icon-deploy { background: var(--primary-light); color: var(--primary); }
+.activity-icon.icon-config { background: var(--warning-light); color: var(--warning); }
+.activity-icon.icon-scale { background: var(--success-light); color: var(--success); }
+.activity-icon.icon-restart { background: var(--primary-light); color: var(--primary); }
+.activity-icon.icon-addon { background: #dbeafe; color: #3b82f6; }
+.activity-icon.icon-domain { background: #fae8ff; color: #a855f7; }
+.activity-icon.icon-secret { background: var(--danger-light); color: var(--danger); }
+.activity-icon.icon-app { background: var(--success-light); color: var(--success); }
+.activity-icon.icon-webhook { background: #dbeafe; color: #3b82f6; }
+
+.activity-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.activity-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.activity-action {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.actor-badge {
+    font-size: 0.75rem;
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+}
+
+.actor-badge.actor-system {
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+}
+
+.actor-badge.actor-user {
+    background: var(--primary-light);
+    color: var(--primary);
+}
+
+.activity-details {
+    font-size: 0.813rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+}
+
+.activity-time {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+/* Activity Page Styles */
+.activity-page {
+    padding: 1.5rem;
+}
+
+.activity-page .activity-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.activity-page .activity-header h2 {
+    margin: 0;
+}
+
+.activity-controls {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.search-box {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.375rem;
+    padding: 0.25rem 0.75rem;
+}
+
+.search-box svg {
+    color: var(--text-muted);
+}
+
+.search-box .input {
+    border: none;
+    background: transparent;
+    padding: 0.375rem 0;
+    min-width: 150px;
+}
+
+.filter-buttons {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.activity-row {
+    display: flex;
+    gap: 1rem;
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+    align-items: flex-start;
+}
+
+.activity-icon-lg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 0.5rem;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.activity-icon-lg.icon-deploy { background: var(--primary-light); color: var(--primary); }
+.activity-icon-lg.icon-config { background: var(--warning-light); color: var(--warning); }
+.activity-icon-lg.icon-scale { background: var(--success-light); color: var(--success); }
+.activity-icon-lg.icon-restart { background: var(--primary-light); color: var(--primary); }
+.activity-icon-lg.icon-addon { background: #dbeafe; color: #3b82f6; }
+.activity-icon-lg.icon-domain { background: #fae8ff; color: #a855f7; }
+.activity-icon-lg.icon-secret { background: var(--danger-light); color: var(--danger); }
+.activity-icon-lg.icon-app { background: var(--success-light); color: var(--success); }
+.activity-icon-lg.icon-webhook { background: #dbeafe; color: #3b82f6; }
+
+.activity-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.activity-main {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.activity-action-lg {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.activity-app-link {
+    font-size: 0.875rem;
+    color: var(--primary);
+    text-decoration: none;
+}
+
+.activity-app-link:hover {
+    text-decoration: underline;
+}
+
+.activity-resource {
+    font-size: 0.813rem;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    padding: 0.125rem 0.5rem;
+    border-radius: 0.25rem;
+}
+
+.activity-details-lg {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-top: 0.5rem;
+}
+
+.activity-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.activity-time-lg {
+    font-size: 0.813rem;
+    color: var(--text-muted);
+}
+
+.activity-type-badge {
+    font-size: 0.688rem;
+    font-weight: 500;
+    padding: 0.125rem 0.5rem;
+    border-radius: 0.25rem;
+    text-transform: uppercase;
+}
+
+.activity-type-badge.type-deploy { background: var(--primary-light); color: var(--primary); }
+.activity-type-badge.type-config { background: var(--warning-light); color: var(--warning); }
+.activity-type-badge.type-scale { background: var(--success-light); color: var(--success); }
+.activity-type-badge.type-restart { background: var(--primary-light); color: var(--primary); }
+.activity-type-badge.type-addon { background: #dbeafe; color: #3b82f6; }
+.activity-type-badge.type-domain { background: #fae8ff; color: #a855f7; }
+.activity-type-badge.type-secret { background: var(--danger-light); color: var(--danger); }
+.activity-type-badge.type-app { background: var(--success-light); color: var(--success); }
+.activity-type-badge.type-webhook { background: #dbeafe; color: #3b82f6; }
+.activity-type-badge.type-default { background: var(--bg-tertiary); color: var(--text-secondary); }
 "##;
 
 const DASHBOARD_JS: &str = r##"

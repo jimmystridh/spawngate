@@ -2844,6 +2844,67 @@ impl PlatformApi {
                 json_response(StatusCode::OK, serde_json::to_string(&response).unwrap())
             }
 
+            // Get activity for an app (HTMX partial)
+            (&Method::GET, p) if p.ends_with("/activity") => {
+                let app_name = p.strip_prefix("/dashboard/apps/")
+                    .and_then(|p| p.strip_suffix("/activity"))
+                    .unwrap_or("");
+                match self.db.get_app_activity(app_name, 20) {
+                    Ok(events) => {
+                        let events_json: Vec<serde_json::Value> = events.iter().map(|e| {
+                            serde_json::json!({
+                                "id": e.id,
+                                "event_type": e.event_type,
+                                "action": e.action,
+                                "app_name": e.app_name,
+                                "resource_type": e.resource_type,
+                                "resource_id": e.resource_id,
+                                "actor": e.actor,
+                                "actor_type": e.actor_type,
+                                "details": e.details,
+                                "created_at": e.created_at,
+                            })
+                        }).collect();
+                        let html = dashboard::render_activity_feed(&events_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get activity");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load activity</div>"##)
+                    }
+                }
+            }
+
+            // Get platform-wide activity (for activity tab)
+            (&Method::GET, "/dashboard/activity") => {
+                match self.db.get_all_activity(100) {
+                    Ok(events) => {
+                        let events_json: Vec<serde_json::Value> = events.iter().map(|e| {
+                            serde_json::json!({
+                                "id": e.id,
+                                "event_type": e.event_type,
+                                "action": e.action,
+                                "app_name": e.app_name,
+                                "resource_type": e.resource_type,
+                                "resource_id": e.resource_id,
+                                "actor": e.actor,
+                                "actor_type": e.actor_type,
+                                "details": e.details,
+                                "created_at": e.created_at,
+                            })
+                        }).collect();
+                        let html = dashboard::render_activity_page(&events_json);
+                        html_response(StatusCode::OK, html)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to get activity");
+                        html_response(StatusCode::INTERNAL_SERVER_ERROR,
+                            r##"<div class="error">Failed to load activity</div>"##)
+                    }
+                }
+            }
+
             _ => {
                 html_response(StatusCode::NOT_FOUND,
                     r##"<div class="error">Not found</div>"##)

@@ -132,8 +132,8 @@ Full-featured web UI for managing the PaaS platform.
 - [x] Memory/CPU charts (per instance)
 - [ ] Alerting rules (future)
 
-### Phase 10: Activity & Notifications
-- [ ] Activity feed (all actions)
-- [ ] Filterable event log
-- [ ] User action attribution
+### Phase 10: Activity & Notifications ✅
+- [x] Activity feed (all actions)
+- [x] Filterable event log
+- [x] User action attribution
 - [ ] Email/webhook notifications (future)
