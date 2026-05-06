@@ -147,13 +147,18 @@ impl ConnectionPool {
         port: u16,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, PoolError> {
         // Build the URI for the backend
-        let uri = format!("http://127.0.0.1:{}{}", port, req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/"));
+        let uri = format!(
+            "http://127.0.0.1:{}{}",
+            port,
+            req.uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/")
+        );
 
         // Create a new request with the backend URI
         let (parts, body) = req.into_parts();
-        let mut builder = Request::builder()
-            .method(parts.method)
-            .uri(&uri);
+        let mut builder = Request::builder().method(parts.method).uri(&uri);
 
         // Copy headers
         for (key, value) in parts.headers.iter() {

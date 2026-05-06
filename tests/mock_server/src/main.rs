@@ -41,7 +41,10 @@ async fn main() {
 
     // Simulate startup delay
     if startup_delay > 0 {
-        eprintln!("Mock server: sleeping for {}ms before starting", startup_delay);
+        eprintln!(
+            "Mock server: sleeping for {}ms before starting",
+            startup_delay
+        );
         tokio::time::sleep(Duration::from_millis(startup_delay)).await;
     }
 
@@ -166,7 +169,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream) {
             for (i, h) in headers.iter().enumerate() {
                 if let Some((name, value)) = h.split_once(':') {
                     if i > 0 {
-                        headers_json.push_str(",");
+                        headers_json.push(',');
                     }
                     headers_json.push_str(&format!(
                         "\"{}\":\"{}\"",
@@ -185,7 +188,10 @@ async fn handle_connection(mut stream: tokio::net::TcpStream) {
         "/error" => ("500 Internal Server Error", "error".to_string()),
         _ => {
             let uptime = get_uptime();
-            ("200 OK", format!("Hello! Uptime: {:.1}s", uptime.as_secs_f64()))
+            (
+                "200 OK",
+                format!("Hello! Uptime: {:.1}s", uptime.as_secs_f64()),
+            )
         }
     };
 

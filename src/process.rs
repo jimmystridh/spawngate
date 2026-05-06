@@ -306,7 +306,8 @@ impl ProcessManager {
             consecutive_failures: 0,
         };
 
-        self.processes.insert(hostname.to_string(), Mutex::new(process));
+        self.processes
+            .insert(hostname.to_string(), Mutex::new(process));
 
         // Start health check polling
         let manager = Arc::clone(self);
@@ -329,9 +330,10 @@ impl ProcessManager {
         hostname: &str,
         config: &BackendConfig,
     ) -> anyhow::Result<ProcessHandle> {
-        let command = config.command.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Local backend requires 'command' field")
-        })?;
+        let command = config
+            .command
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Local backend requires 'command' field"))?;
 
         info!(hostname, command = %command, "Starting local backend");
 
@@ -372,19 +374,17 @@ impl ProcessManager {
         hostname: &str,
         config: &BackendConfig,
     ) -> anyhow::Result<ProcessHandle> {
-        let image = config.image.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Docker backend requires 'image' field")
-        })?;
+        let image = config
+            .image
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Docker backend requires 'image' field"))?;
 
         info!(hostname, image = %image, "Starting Docker backend");
 
-        let docker = self.get_docker(config.docker_host.as_deref()).await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot start Docker backend '{}': {}",
-                    hostname, e
-                )
-            })?;
+        let docker = self
+            .get_docker(config.docker_host.as_deref())
+            .await
+            .map_err(|e| anyhow::anyhow!("Cannot start Docker backend '{}': {}", hostname, e))?;
 
         let container_id = docker
             .start_container(config, hostname, &self.admin_url)
@@ -392,7 +392,9 @@ impl ProcessManager {
             .map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to start Docker container for backend '{}' (image: {}): {}",
-                    hostname, image, e
+                    hostname,
+                    image,
+                    e
                 )
             })?;
 
@@ -493,12 +495,19 @@ impl ProcessManager {
                     // Continue monitoring
                 }
                 BackendState::Stopping | BackendState::Stopped => {
-                    debug!(hostname, ?state, "Stopping health monitoring, backend shutting down");
+                    debug!(
+                        hostname,
+                        ?state,
+                        "Stopping health monitoring, backend shutting down"
+                    );
                     return;
                 }
                 BackendState::Starting => {
                     // Shouldn't happen, but handle gracefully
-                    debug!(hostname, "Backend unexpectedly in Starting state during monitoring");
+                    debug!(
+                        hostname,
+                        "Backend unexpectedly in Starting state during monitoring"
+                    );
                     return;
                 }
             }
@@ -591,7 +600,12 @@ impl ProcessManager {
         let defaults = self.get_defaults();
         let (drain_timeout, grace_period) = self
             .get_config(hostname)
-            .map(|c| (c.drain_timeout(&defaults), c.shutdown_grace_period(&defaults)))
+            .map(|c| {
+                (
+                    c.drain_timeout(&defaults),
+                    c.shutdown_grace_period(&defaults),
+                )
+            })
             .unwrap_or((
                 Duration::from_secs(defaults.drain_timeout_secs),
                 Duration::from_secs(defaults.shutdown_grace_period_secs),
@@ -616,8 +630,7 @@ impl ProcessManager {
                     let remaining = counter.load(Ordering::SeqCst);
                     warn!(
                         hostname,
-                        remaining,
-                        "Drain timeout exceeded, proceeding with shutdown"
+                        remaining, "Drain timeout exceeded, proceeding with shutdown"
                     );
                     break;
                 }
@@ -625,7 +638,11 @@ impl ProcessManager {
             }
             let drained_in = drain_start.elapsed();
             if drained_in > Duration::from_millis(100) {
-                info!(hostname, drained_in_ms = drained_in.as_millis(), "Drained in-flight requests");
+                info!(
+                    hostname,
+                    drained_in_ms = drained_in.as_millis(),
+                    "Drained in-flight requests"
+                );
             }
         }
 
@@ -639,14 +656,20 @@ impl ProcessManager {
 
         match backend.handle {
             ProcessHandle::Local(mut child) => {
-                self.stop_local_process(hostname, &mut child, grace_period).await;
+                self.stop_local_process(hostname, &mut child, grace_period)
+                    .await;
             }
-            ProcessHandle::Docker { container_id, docker, log_shutdown } => {
+            ProcessHandle::Docker {
+                container_id,
+                docker,
+                log_shutdown,
+            } => {
                 // Stop log streaming first
                 if let Some(shutdown) = log_shutdown {
                     let _ = shutdown.send(true);
                 }
-                self.stop_docker_container(hostname, &container_id, &docker, grace_period).await;
+                self.stop_docker_container(hostname, &container_id, &docker, grace_period)
+                    .await;
             }
         }
     }
@@ -796,7 +819,8 @@ impl ProcessManager {
     /// Note: Server settings (ports, TLS, ACME) cannot be changed via hot reload.
     pub async fn reload_config<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<ReloadResult> {
         let new_config = Config::load(path)?;
-        self.apply_config(new_config.backends, new_config.defaults).await
+        self.apply_config(new_config.backends, new_config.defaults)
+            .await
     }
 
     /// Apply new configuration
@@ -1151,14 +1175,17 @@ mod tests {
         cfg.startup_timeout_secs = Some(1);
         cfg.health_check_interval_ms = Some(50);
         cfg.shutdown_grace_period_secs = Some(2); // 2 seconds grace period
-        cfg.drain_timeout_secs = Some(5);          // 5 seconds drain timeout
+        cfg.drain_timeout_secs = Some(5); // 5 seconds drain timeout
         configs.insert("test.com".to_string(), cfg);
 
         let defaults = BackendDefaults::default();
         let config = configs.get("test.com").unwrap();
 
         // Verify custom values are used
-        assert_eq!(config.shutdown_grace_period(&defaults), Duration::from_secs(2));
+        assert_eq!(
+            config.shutdown_grace_period(&defaults),
+            Duration::from_secs(2)
+        );
         assert_eq!(config.drain_timeout(&defaults), Duration::from_secs(5));
     }
 }
