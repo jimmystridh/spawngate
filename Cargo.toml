@@ -2,6 +2,7 @@
 name = "spawngate"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 description = "A serverless-style reverse proxy that spawns backends on demand"
 
 [dependencies]
@@ -15,7 +16,7 @@ http-body-util = "0.1"
 
 # Configuration
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 # Logging
 tracing = "0.1"
@@ -23,35 +24,35 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Utilities
 dashmap = "6"
 parking_lot = "0.12"
-serde_json = "1.0.148"
-uuid = { version = "1.19.0", features = ["v4"] }
+serde_json = "1.0.149"
+uuid = { version = "1.23.1", features = ["v4"] }
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
-rcgen = "0.13"
+rcgen = "0.14"
 
 # ACME/Let's Encrypt
-instant-acme = "0.7"
+instant-acme = "0.8"
 futures = "0.3"
 base64 = "0.22"
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # Docker API
-bollard = "0.18"
+bollard = "0.21"
 
 # Unix-specific
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-sha1 = "0.10"
+sha1 = "0.11"
 base64 = "0.22"
 h2 = "0.4"
 http = "1"

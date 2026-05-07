@@ -230,7 +230,6 @@ impl Default for BackendDefaults {
     }
 }
 
-
 /// Backend type: local process or Docker container
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -424,7 +423,10 @@ impl BackendConfig {
     }
 
     pub fn startup_timeout(&self, defaults: &BackendDefaults) -> Duration {
-        Duration::from_secs(self.startup_timeout_secs.unwrap_or(defaults.startup_timeout_secs))
+        Duration::from_secs(
+            self.startup_timeout_secs
+                .unwrap_or(defaults.startup_timeout_secs),
+        )
     }
 
     pub fn health_check_interval(&self, defaults: &BackendDefaults) -> Duration {
@@ -435,9 +437,7 @@ impl BackendConfig {
     }
 
     pub fn health_path<'a>(&'a self, defaults: &'a BackendDefaults) -> &'a str {
-        self.health_path
-            .as_deref()
-            .unwrap_or(&defaults.health_path)
+        self.health_path.as_deref().unwrap_or(&defaults.health_path)
     }
 
     pub fn shutdown_grace_period(&self, defaults: &BackendDefaults) -> Duration {
@@ -479,16 +479,14 @@ impl BackendConfig {
             BackendType::Local => {
                 if self.command.is_none() {
                     return Err(format!(
-                        "Backend '{}': local backend requires 'command' field",
-                        hostname
+                        "Backend '{hostname}': local backend requires 'command' field"
                     ));
                 }
             }
             BackendType::Docker => {
                 if self.image.is_none() {
                     return Err(format!(
-                        "Backend '{}': Docker backend requires 'image' field",
-                        hostname
+                        "Backend '{hostname}': Docker backend requires 'image' field"
                     ));
                 }
             }
@@ -496,8 +494,7 @@ impl BackendConfig {
 
         if self.port == 0 {
             return Err(format!(
-                "Backend '{}': 'port' must be greater than 0",
-                hostname
+                "Backend '{hostname}': 'port' must be greater than 0"
             ));
         }
 
@@ -653,10 +650,12 @@ idle_timeout_secs = 120
     #[test]
     fn test_backend_config_uses_defaults() {
         let defaults = BackendDefaults::default();
-        let backend: BackendConfig = toml::from_str(r#"
+        let backend: BackendConfig = toml::from_str(
+            r#"
 command = "node"
 port = 3000
-"#)
+"#,
+        )
         .unwrap();
 
         assert_eq!(backend.idle_timeout(&defaults), Duration::from_secs(600));
@@ -682,7 +681,8 @@ port = 3000
     #[test]
     fn test_backend_config_overrides_defaults() {
         let defaults = BackendDefaults::default();
-        let backend: BackendConfig = toml::from_str(r#"
+        let backend: BackendConfig = toml::from_str(
+            r#"
 command = "node"
 port = 3000
 idle_timeout_secs = 120
@@ -694,7 +694,8 @@ drain_timeout_secs = 15
 request_timeout_secs = 10
 ready_health_check_interval_ms = 10000
 unhealthy_threshold = 5
-"#)
+"#,
+        )
         .unwrap();
 
         assert_eq!(backend.idle_timeout(&defaults), Duration::from_secs(120));
@@ -806,8 +807,14 @@ cache_dir = "/var/lib/acme"
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.server.acme.enabled);
-        assert_eq!(config.server.acme.domains, vec!["example.com", "api.example.com"]);
-        assert_eq!(config.server.acme.email, Some("admin@example.com".to_string()));
+        assert_eq!(
+            config.server.acme.domains,
+            vec!["example.com", "api.example.com"]
+        );
+        assert_eq!(
+            config.server.acme.email,
+            Some("admin@example.com".to_string())
+        );
         assert_eq!(config.server.acme.cache_dir, "/var/lib/acme");
         assert!(config.server.acme_enabled());
     }
@@ -886,7 +893,10 @@ email = "admin@example.com"
 challenge_type = "tls-alpn-01"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.server.acme.challenge_type, AcmeChallengeType::TlsAlpn01);
+        assert_eq!(
+            config.server.acme.challenge_type,
+            AcmeChallengeType::TlsAlpn01
+        );
     }
 
     #[test]

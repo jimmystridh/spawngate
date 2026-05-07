@@ -75,7 +75,11 @@ impl AdminServer {
 
     pub async fn run(self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.bind_addr).await?;
-        let protocol = if self.tls_acceptor.is_some() { "HTTPS" } else { "HTTP" };
+        let protocol = if self.tls_acceptor.is_some() {
+            "HTTPS"
+        } else {
+            "HTTP"
+        };
         info!(addr = %self.bind_addr, protocol, "Admin API server listening (HTTP/1.1 and HTTP/2)");
 
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -145,7 +149,7 @@ where
     AutoBuilder::new(TokioExecutor::new())
         .serve_connection(io, service)
         .await
-        .map_err(|e| anyhow::anyhow!("Admin connection error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Admin connection error: {e}"))?;
 
     Ok(())
 }

@@ -26,8 +26,8 @@ pub enum PoolError {
 impl std::fmt::Display for PoolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PoolError::Client(e) => write!(f, "Client error: {}", e),
-            PoolError::RequestBuild(s) => write!(f, "Request build error: {}", s),
+            PoolError::Client(e) => write!(f, "Client error: {e}"),
+            PoolError::RequestBuild(s) => write!(f, "Request build error: {s}"),
         }
     }
 }
@@ -147,13 +147,18 @@ impl ConnectionPool {
         port: u16,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, PoolError> {
         // Build the URI for the backend
-        let uri = format!("http://127.0.0.1:{}{}", port, req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/"));
+        let uri = format!(
+            "http://127.0.0.1:{}{}",
+            port,
+            req.uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/")
+        );
 
         // Create a new request with the backend URI
         let (parts, body) = req.into_parts();
-        let mut builder = Request::builder()
-            .method(parts.method)
-            .uri(&uri);
+        let mut builder = Request::builder().method(parts.method).uri(&uri);
 
         // Copy headers
         for (key, value) in parts.headers.iter() {
@@ -180,7 +185,7 @@ impl ConnectionPool {
     /// Check if a backend is reachable (useful for health checks)
     /// Uses the dedicated health check client for connection reuse
     pub async fn check_backend(&self, port: u16, path: &str) -> bool {
-        let uri = format!("http://127.0.0.1:{}{}", port, path);
+        let uri = format!("http://127.0.0.1:{port}{path}");
 
         let req = match Request::builder()
             .method("GET")

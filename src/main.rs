@@ -1,4 +1,4 @@
-use rcgen::{CertifiedKey, generate_simple_self_signed};
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use spawngate::acme::AcmeManager;
 use spawngate::admin::{AdminServer, PKG_NAME, VERSION};
@@ -59,11 +59,8 @@ async fn main() -> anyhow::Result<()> {
     let admin_url = format!("http://127.0.0.1:{}", config.server.admin_port);
 
     // Create process manager
-    let process_manager = ProcessManager::new(
-        config.backends.clone(),
-        config.defaults.clone(),
-        admin_url,
-    );
+    let process_manager =
+        ProcessManager::new(config.backends.clone(), config.defaults.clone(), admin_url);
 
     let pool_config = PoolConfig {
         max_idle_per_host: config.server.pool_max_idle_per_host,
@@ -87,7 +84,11 @@ async fn main() -> anyhow::Result<()> {
 
         // Create cache directory if it doesn't exist
         std::fs::create_dir_all(&acme_config.cache_dir).map_err(|e| {
-            anyhow::anyhow!("Failed to create ACME cache directory '{}': {}", acme_config.cache_dir, e)
+            anyhow::anyhow!(
+                "Failed to create ACME cache directory '{}': {}",
+                acme_config.cache_dir,
+                e
+            )
         })?;
 
         info!(
@@ -131,9 +132,12 @@ async fn main() -> anyhow::Result<()> {
         let tls_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
-            .map_err(|e| anyhow::anyhow!("TLS configuration error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("TLS configuration error: {e}"))?;
 
-        (Some(TlsAcceptor::from(Arc::new(tls_config))), None::<Arc<AcmeManager>>)
+        (
+            Some(TlsAcceptor::from(Arc::new(tls_config))),
+            None::<Arc<AcmeManager>>,
+        )
     } else {
         (None, None::<Arc<AcmeManager>>)
     };
@@ -155,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
             .parse()
             .map_err(|e| {
                 error!(bind = %config.server.bind, port = http_port, error = %e, "Invalid HTTP bind address");
-                anyhow::anyhow!("Invalid HTTP bind address: {}", e)
+                anyhow::anyhow!("Invalid HTTP bind address: {e}")
             })?;
 
         let mut http_proxy = ProxyServer::with_pool_config(
@@ -194,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
             .parse()
             .map_err(|e| {
                 error!(bind = %config.server.bind, port = https_port, error = %e, "Invalid HTTPS bind address");
-                anyhow::anyhow!("Invalid HTTPS bind address: {}", e)
+                anyhow::anyhow!("Invalid HTTPS bind address: {e}")
             })?;
 
         let https_proxy = ProxyServer::with_pool_config(
@@ -204,7 +208,11 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
             pool_config,
         )
-        .with_tls(tls_acceptor.clone().expect("TLS acceptor required for HTTPS"));
+        .with_tls(
+            tls_acceptor
+                .clone()
+                .expect("TLS acceptor required for HTTPS"),
+        );
 
         Some(tokio::spawn(async move {
             if let Err(e) = https_proxy.run().await {
@@ -233,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| {
             error!(admin_port = config.server.admin_port, error = %e, "Invalid admin bind address");
-            anyhow::anyhow!("Invalid admin bind address: {}", e)
+            anyhow::anyhow!("Invalid admin bind address: {e}")
         })?;
 
     // Generate or use configured admin token
@@ -243,7 +251,12 @@ async fn main() -> anyhow::Result<()> {
         token
     });
 
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&process_manager), shutdown_rx.clone(), admin_token);
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&process_manager),
+        shutdown_rx.clone(),
+        admin_token,
+    );
 
     // Spawn idle cleanup task
     let cleanup_manager = Arc::clone(&process_manager);
@@ -263,10 +276,9 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate())
-            .expect("Failed to install SIGTERM handler");
-        let mut sighup = signal(SignalKind::hangup())
-            .expect("Failed to install SIGHUP handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        let mut sighup = signal(SignalKind::hangup()).expect("Failed to install SIGHUP handler");
 
         loop {
             tokio::select! {
@@ -306,7 +318,9 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(not(unix))]
     {
-        tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for Ctrl+C");
         info!("Received Ctrl+C, shutting down...");
     }
 
@@ -345,7 +359,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn idle_cleanup_loop(process_manager: Arc<ProcessManager>, mut shutdown_rx: watch::Receiver<bool>) {
+async fn idle_cleanup_loop(
+    process_manager: Arc<ProcessManager>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
     let interval = Duration::from_secs(10); // Check every 10 seconds
 
     loop {
@@ -394,7 +411,7 @@ impl PidFile {
         // Write PID
         let pid = std::process::id();
         use std::io::Write;
-        writeln!(&file, "{}", pid)?;
+        writeln!(&file, "{pid}")?;
 
         // Keep the file handle open to maintain the lock
         Ok(Self { _file: file })
@@ -410,7 +427,7 @@ impl PidFile {
         let pid = std::process::id();
         let mut file = std::fs::File::create(path)?;
         use std::io::Write;
-        writeln!(file, "{}", pid)?;
+        writeln!(file, "{pid}")?;
         Ok(Self)
     }
 }
@@ -420,11 +437,7 @@ fn write_pid_file(path: &Path) -> anyhow::Result<PidFile> {
 }
 
 fn print_startup_banner(config: &Config) {
-    info!(
-        name = PKG_NAME,
-        version = VERSION,
-        "Starting proxy server"
-    );
+    info!(name = PKG_NAME, version = VERSION, "Starting proxy server");
     let http_port = config.server.http_port();
     let https_port = config.server.https_port();
     info!(
@@ -468,27 +481,27 @@ fn print_startup_banner(config: &Config) {
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     let file = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to open certificate file {}: {}", path, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to open certificate file {path}: {e}"))?;
     let mut reader = BufReader::new(file);
     let certs = rustls_pemfile::certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse certificates from {}: {}", path, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse certificates from {path}: {e}"))?;
 
     if certs.is_empty() {
-        anyhow::bail!("No certificates found in {}", path);
+        anyhow::bail!("No certificates found in {path}");
     }
 
     Ok(certs)
 }
 
 fn load_key(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
-    let file = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to open key file {}: {}", path, e))?;
+    let file =
+        File::open(path).map_err(|e| anyhow::anyhow!("Failed to open key file {path}: {e}"))?;
     let mut reader = BufReader::new(file);
 
     loop {
         match rustls_pemfile::read_one(&mut reader)
-            .map_err(|e| anyhow::anyhow!("Failed to parse key from {}: {}", path, e))?
+            .map_err(|e| anyhow::anyhow!("Failed to parse key from {path}: {e}"))?
         {
             Some(rustls_pemfile::Item::Pkcs1Key(key)) => return Ok(key.into()),
             Some(rustls_pemfile::Item::Pkcs8Key(key)) => return Ok(key.into()),
@@ -498,18 +511,19 @@ fn load_key(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
         }
     }
 
-    anyhow::bail!("No private key found in {}", path)
+    anyhow::bail!("No private key found in {path}")
 }
 
-fn generate_self_signed_cert() -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+fn generate_self_signed_cert(
+) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
 
-    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)
-        .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {}", e))?;
+    let CertifiedKey { cert, signing_key } = generate_simple_self_signed(subject_alt_names)
+        .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {e}"))?;
 
     let cert_der = CertificateDer::from(cert.der().to_vec());
-    let key_der = PrivateKeyDer::try_from(key_pair.serialize_der())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {}", e))?;
+    let key_der = PrivateKeyDer::try_from(signing_key.serialize_der())
+        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {e}"))?;
 
     Ok((vec![cert_der], key_der))
 }

@@ -182,14 +182,16 @@ impl AcmeManager {
             debug!(path = %account_path.display(), "Loading existing ACME account");
             let data = std::fs::read_to_string(&account_path)?;
             let credentials: AccountCredentials = serde_json::from_str(&data)?;
-            let account = Account::from_credentials(credentials).await?;
+            let account = Account::builder()?.from_credentials(credentials).await?;
             return Ok(account);
         }
 
         info!("Creating new ACME account");
-        let email = self.config.email.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("ACME email is required for account creation")
-        })?;
+        let email = self
+            .config
+            .email
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ACME email is required for account creation"))?;
 
         let directory_url = self
             .config
@@ -197,16 +199,19 @@ impl AcmeManager {
             .as_deref()
             .unwrap_or(LetsEncrypt::Production.url());
 
-        let (account, credentials) = Account::create(
-            &NewAccount {
-                contact: &[&format!("mailto:{}", email)],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            directory_url,
-            None,
-        )
-        .await?;
+        let contact = format!("mailto:{email}");
+        let contacts = [contact.as_str()];
+        let (account, credentials) = Account::builder()?
+            .create(
+                &NewAccount {
+                    contact: &contacts,
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                directory_url.to_string(),
+                None,
+            )
+            .await?;
 
         // Save credentials for future use
         std::fs::create_dir_all(&self.cache_dir)?;
@@ -229,9 +234,10 @@ impl AcmeManager {
         let cert_data = std::fs::read(&cert_path).ok()?;
         let key_data = std::fs::read(&key_path).ok()?;
 
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(&cert_data[..]))
-            .filter_map(|c| c.ok())
-            .collect();
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(&cert_data[..]))
+                .filter_map(|c| c.ok())
+                .collect();
 
         if certs.is_empty() {
             return None;
@@ -286,7 +292,12 @@ impl AcmeManager {
     async fn obtain_certificate(
         &self,
         account: &Account,
-    ) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>, String, String)> {
+    ) -> anyhow::Result<(
+        Vec<CertificateDer<'static>>,
+        PrivateKeyDer<'static>,
+        String,
+        String,
+    )> {
         let identifiers: Vec<Identifier> = self
             .config
             .domains
@@ -296,108 +307,60 @@ impl AcmeManager {
 
         info!(domains = ?self.config.domains, "Requesting new certificate");
 
-        let mut order = account
-            .new_order(&NewOrder {
-                identifiers: &identifiers,
-            })
-            .await?;
-
-        let authorizations = order.authorizations().await?;
+        let mut order = account.new_order(&NewOrder::new(&identifiers)).await?;
 
         // Process each authorization
-        for authz in authorizations {
-            if authz.status == AuthorizationStatus::Valid {
-                continue;
-            }
-
-            let identifier = match &authz.identifier {
-                Identifier::Dns(domain) => domain.clone(),
-            };
-
-            let challenge_type = match self.config.challenge_type {
-                AcmeChallengeType::Http01 => ChallengeType::Http01,
-                AcmeChallengeType::TlsAlpn01 => ChallengeType::TlsAlpn01,
-            };
-
-            let challenge = authz
-                .challenges
-                .iter()
-                .find(|c| c.r#type == challenge_type)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Challenge type {:?} not available for {}",
-                        self.config.challenge_type,
-                        identifier
-                    )
-                })?;
-
-            let key_auth = order.key_authorization(challenge);
-            let key_auth_str = key_auth.as_str().to_string();
-            let digest: Vec<u8> = key_auth.digest().as_ref().to_vec();
-
-            match self.config.challenge_type {
-                AcmeChallengeType::Http01 => {
-                    debug!(domain = %identifier, token = %challenge.token, "Setting up HTTP-01 challenge");
-                    self.http01_challenges
-                        .set(challenge.token.clone(), key_auth_str)
-                        .await;
+        let mut challenge_cleanups = Vec::new();
+        {
+            let mut authorizations = order.authorizations();
+            while let Some(authz) = authorizations.next().await {
+                let mut authz = authz?;
+                if authz.status == AuthorizationStatus::Valid {
+                    continue;
                 }
-                AcmeChallengeType::TlsAlpn01 => {
-                    debug!(domain = %identifier, "Setting up TLS-ALPN-01 challenge");
-                    let challenge_cert = create_tls_alpn01_cert(&identifier, &digest)?;
-                    self.tls_alpn01_resolver
-                        .set_challenge_cert(&identifier, challenge_cert)
-                        .await;
-                }
-            }
 
-            // Notify ACME server we're ready
-            order.set_challenge_ready(&challenge.url).await?;
+                let identifier = authz.identifier().to_string();
 
-            // Wait for authorization to become valid
-            let mut attempts = 0;
-            loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                let challenge_type = match self.config.challenge_type {
+                    AcmeChallengeType::Http01 => ChallengeType::Http01,
+                    AcmeChallengeType::TlsAlpn01 => ChallengeType::TlsAlpn01,
+                };
 
-                // Refresh the order and get authorizations again
-                order.refresh().await?;
-                let auths = order.authorizations().await?;
-                let current_auth = auths.iter().find(|a| {
-                    matches!(&a.identifier, Identifier::Dns(d) if d == &identifier)
-                });
+                let challenge_token = {
+                    let mut challenge = authz.challenge(challenge_type).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Challenge type {:?} not available for {}",
+                            self.config.challenge_type,
+                            identifier
+                        )
+                    })?;
 
-                match current_auth.map(|a| &a.status) {
-                    Some(AuthorizationStatus::Valid) => {
-                        info!(domain = %identifier, "Authorization valid");
-                        break;
-                    }
-                    Some(AuthorizationStatus::Pending) => {
-                        attempts += 1;
-                        if attempts > 30 {
-                            anyhow::bail!("Authorization timeout for {}", identifier);
+                    let challenge_token = challenge.token.clone();
+                    let key_auth = challenge.key_authorization();
+                    let key_auth_str = key_auth.as_str().to_string();
+                    let digest: Vec<u8> = key_auth.digest().as_ref().to_vec();
+
+                    match self.config.challenge_type {
+                        AcmeChallengeType::Http01 => {
+                            debug!(domain = %identifier, token = %challenge_token, "Setting up HTTP-01 challenge");
+                            self.http01_challenges
+                                .set(challenge_token.clone(), key_auth_str)
+                                .await;
                         }
-                        debug!(domain = %identifier, attempt = attempts, "Waiting for authorization");
+                        AcmeChallengeType::TlsAlpn01 => {
+                            debug!(domain = %identifier, "Setting up TLS-ALPN-01 challenge");
+                            let challenge_cert = create_tls_alpn01_cert(&identifier, &digest)?;
+                            self.tls_alpn01_resolver
+                                .set_challenge_cert(&identifier, challenge_cert)
+                                .await;
+                        }
                     }
-                    Some(AuthorizationStatus::Invalid) => {
-                        anyhow::bail!("Authorization failed for {}", identifier);
-                    }
-                    Some(status) => {
-                        debug!(domain = %identifier, status = ?status, "Authorization status");
-                    }
-                    None => {
-                        anyhow::bail!("Authorization not found for {}", identifier);
-                    }
-                }
-            }
 
-            // Clean up challenge
-            match self.config.challenge_type {
-                AcmeChallengeType::Http01 => {
-                    self.http01_challenges.remove(&challenge.token).await;
-                }
-                AcmeChallengeType::TlsAlpn01 => {
-                    self.tls_alpn01_resolver.remove_challenge_cert(&identifier).await;
-                }
+                    // Notify ACME server we're ready
+                    challenge.set_ready().await?;
+                    challenge_token
+                };
+                challenge_cleanups.push((identifier, challenge_token));
             }
         }
 
@@ -426,6 +389,20 @@ impl AcmeManager {
             }
         }
 
+        // Clean up challenge material once ACME has validated the order.
+        for (identifier, challenge_token) in challenge_cleanups {
+            match self.config.challenge_type {
+                AcmeChallengeType::Http01 => {
+                    self.http01_challenges.remove(&challenge_token).await;
+                }
+                AcmeChallengeType::TlsAlpn01 => {
+                    self.tls_alpn01_resolver
+                        .remove_challenge_cert(&identifier)
+                        .await;
+                }
+            }
+        }
+
         // Generate CSR and finalize order
         let mut params = CertificateParams::new(self.config.domains.clone())?;
         params.distinguished_name = DistinguishedName::new();
@@ -436,7 +413,7 @@ impl AcmeManager {
         let private_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let csr = params.serialize_request(&private_key)?;
 
-        order.finalize(csr.der()).await?;
+        order.finalize_csr(csr.der().as_ref()).await?;
 
         // Wait for certificate
         let mut attempts = 0;
@@ -471,7 +448,7 @@ impl AcmeManager {
                 .collect();
 
         let key = PrivateKeyDer::try_from(private_key.serialize_der())
-            .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse private key: {e}"))?;
 
         info!(domains = ?self.config.domains, "Certificate obtained successfully");
 
@@ -485,7 +462,7 @@ impl AcmeManager {
         key: PrivateKeyDer<'static>,
     ) -> anyhow::Result<()> {
         let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
-            .map_err(|e| anyhow::anyhow!("Failed to create signing key: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create signing key: {e}"))?;
 
         let certified_key = Arc::new(CertifiedKey::new(certs.clone(), signing_key));
 
@@ -508,9 +485,9 @@ impl AcmeManager {
         &self,
     ) -> Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         let guard = self.current_cert.read().await;
-        guard.as_ref().map(|(certs, key)| {
-            (certs.clone(), key.clone_key())
-        })
+        guard
+            .as_ref()
+            .map(|(certs, key)| (certs.clone(), key.clone_key()))
     }
 
     /// Run the ACME manager - obtains and renews certificates
@@ -598,10 +575,10 @@ fn create_tls_alpn01_cert(domain: &str, digest: &[u8]) -> anyhow::Result<Arc<Cer
 
     let cert_der = CertificateDer::from(cert.der().to_vec());
     let key_der = PrivateKeyDer::try_from(key_pair.serialize_der())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {e}"))?;
 
     let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)
-        .map_err(|e| anyhow::anyhow!("Failed to create signing key: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create signing key: {e}"))?;
 
     Ok(Arc::new(CertifiedKey::new(vec![cert_der], signing_key)))
 }
@@ -681,12 +658,12 @@ fn validate_cache_dir(path: &str) -> anyhow::Result<PathBuf> {
     // If path exists, canonicalize it to resolve symlinks
     if path_buf.exists() {
         let canonical = path_buf.canonicalize().map_err(|e| {
-            anyhow::anyhow!("Failed to canonicalize ACME cache directory '{}': {}", path, e)
+            anyhow::anyhow!("Failed to canonicalize ACME cache directory '{path}': {e}")
         })?;
 
         // Verify it's a directory
         if !canonical.is_dir() {
-            anyhow::bail!("ACME cache path '{}' exists but is not a directory", path);
+            anyhow::bail!("ACME cache path '{path}' exists but is not a directory");
         }
 
         return Ok(canonical);
@@ -700,9 +677,9 @@ fn validate_cache_dir(path: &str) -> anyhow::Result<PathBuf> {
         }
 
         if parent.exists() {
-            let canonical_parent = parent.canonicalize().map_err(|e| {
-                anyhow::anyhow!("Failed to canonicalize parent directory: {}", e)
-            })?;
+            let canonical_parent = parent
+                .canonicalize()
+                .map_err(|e| anyhow::anyhow!("Failed to canonicalize parent directory: {e}"))?;
 
             // Rebuild path with canonical parent
             if let Some(file_name) = path_buf.file_name() {

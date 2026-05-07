@@ -63,7 +63,7 @@ fn mock_backend_config_with_delay(port: u16, delay_ms: u64) -> BackendConfig {
 async fn wait_for_port(port: u16, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if TcpStream::connect(format!("127.0.0.1:{}", port))
+        if TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .is_ok()
         {
@@ -76,12 +76,10 @@ async fn wait_for_port(port: u16, timeout: Duration) -> bool {
 
 /// Send a simple HTTP request and get response
 async fn http_get(port: u16, path: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await?;
 
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-        path, port
-    );
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
 
     let mut response = String::new();
@@ -90,12 +88,15 @@ async fn http_get(port: u16, path: &str) -> Result<String, Box<dyn std::error::E
 }
 
 /// Send authenticated HTTP GET request (for admin API testing)
-async fn http_get_with_auth(port: u16, path: &str, token: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+async fn http_get_with_auth(
+    port: u16,
+    path: &str,
+    token: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await?;
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
-        path, port, token
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).await?;
 
@@ -110,12 +111,9 @@ async fn http_get_with_host(
     path: &str,
     host: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await?;
 
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        path, host
-    );
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
 
     let mut response = String::new();
@@ -401,19 +399,27 @@ async fn test_admin_api_ready_callback() {
     let admin_port = 30007;
 
     let mut configs = HashMap::new();
-    configs.insert("callback.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "callback.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
 
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
@@ -444,31 +450,33 @@ async fn test_admin_api_manual_ready_call() {
 
     let mut configs = HashMap::new();
     // Use sleep instead of mock server so we control when it becomes ready
-    configs.insert(
-        "manual.local".to_string(),
-{
-            let mut cfg = BackendConfig::local("sleep", backend_port);
-            cfg.args = vec!["60".to_string()];
-            cfg.health_path = Some("/health".to_string());
-            cfg.startup_timeout_secs = Some(60); // Long timeout
-            cfg.health_check_interval_ms = Some(1000); // Slow polling
-            cfg.shutdown_grace_period_secs = Some(1);
-            cfg.drain_timeout_secs = Some(1);
-            cfg
-        },
-    );
+    configs.insert("manual.local".to_string(), {
+        let mut cfg = BackendConfig::local("sleep", backend_port);
+        cfg.args = vec!["60".to_string()];
+        cfg.health_path = Some("/health".to_string());
+        cfg.startup_timeout_secs = Some(60); // Long timeout
+        cfg.health_check_interval_ms = Some(1000); // Slow polling
+        cfg.shutdown_grace_period_secs = Some(1);
+        cfg.drain_timeout_secs = Some(1);
+        cfg
+    });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
 
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
@@ -482,12 +490,11 @@ async fn test_admin_api_manual_ready_call() {
     assert_eq!(manager.get_state("manual.local"), BackendState::Starting);
 
     // Manually call the ready endpoint
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", admin_port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{admin_port}"))
         .await
         .unwrap();
     let request = format!(
-        "POST /ready/manual.local HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer test-token\r\nContent-Length: 0\r\n\r\n",
-        admin_port
+        "POST /ready/manual.local HTTP/1.1\r\nHost: 127.0.0.1:{admin_port}\r\nAuthorization: Bearer test-token\r\nContent-Length: 0\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).await.unwrap();
 
@@ -530,19 +537,29 @@ async fn test_full_proxy_flow() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Start proxy server
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -560,12 +577,8 @@ async fn test_full_proxy_flow() {
         .unwrap();
 
     // Should get response from backend
-    assert!(response.contains("200 OK"), "Response: {}", response);
-    assert!(
-        response.contains("echo response"),
-        "Response: {}",
-        response
-    );
+    assert!(response.contains("200 OK"), "Response: {response}");
+    assert!(response.contains("echo response"), "Response: {response}");
 
     // Backend should now be ready
     assert_eq!(manager.get_state("proxy.local"), BackendState::Ready);
@@ -599,8 +612,13 @@ async fn test_proxy_unknown_host_returns_404() {
     );
 
     // Start proxy server
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -614,8 +632,7 @@ async fn test_proxy_unknown_host_returns_404() {
     let response = response.unwrap();
     assert!(
         response.contains("404") || response.contains("Not Found"),
-        "Response: {}",
-        response
+        "Response: {response}"
     );
 
     proxy_handle.abort();
@@ -635,20 +652,17 @@ async fn test_idle_timeout_cleanup() {
     let port = 30014;
 
     let mut configs = HashMap::new();
-    configs.insert(
-        "idle.local".to_string(),
-        {
-            let mut cfg = BackendConfig::local(&mock_server_path().to_string_lossy(), port);
-            cfg.health_path = Some("/health".to_string());
-            cfg.idle_timeout_secs = Some(1); // 1 second idle timeout
-            cfg.startup_timeout_secs = Some(10);
-            cfg.health_check_interval_ms = Some(50);
-            cfg.shutdown_grace_period_secs = Some(2);
-            cfg.drain_timeout_secs = Some(5);
-            cfg.ready_health_check_interval_ms = Some(60000); // Long to avoid interference
-            cfg
-        },
-    );
+    configs.insert("idle.local".to_string(), {
+        let mut cfg = BackendConfig::local(&mock_server_path().to_string_lossy(), port);
+        cfg.health_path = Some("/health".to_string());
+        cfg.idle_timeout_secs = Some(1); // 1 second idle timeout
+        cfg.startup_timeout_secs = Some(10);
+        cfg.health_check_interval_ms = Some(50);
+        cfg.shutdown_grace_period_secs = Some(2);
+        cfg.drain_timeout_secs = Some(5);
+        cfg.ready_health_check_interval_ms = Some(60000); // Long to avoid interference
+        cfg
+    });
 
     let manager = ProcessManager::new(
         configs,
@@ -682,20 +696,17 @@ async fn test_activity_resets_idle_timeout() {
     let port = 30015;
 
     let mut configs = HashMap::new();
-    configs.insert(
-        "active.local".to_string(),
-        {
-            let mut cfg = BackendConfig::local(&mock_server_path().to_string_lossy(), port);
-            cfg.health_path = Some("/health".to_string());
-            cfg.idle_timeout_secs = Some(2); // 2 second idle timeout
-            cfg.startup_timeout_secs = Some(10);
-            cfg.health_check_interval_ms = Some(50);
-            cfg.shutdown_grace_period_secs = Some(2);
-            cfg.drain_timeout_secs = Some(5);
-            cfg.ready_health_check_interval_ms = Some(60000); // Long to avoid interference
-            cfg
-        },
-    );
+    configs.insert("active.local".to_string(), {
+        let mut cfg = BackendConfig::local(&mock_server_path().to_string_lossy(), port);
+        cfg.health_path = Some("/health".to_string());
+        cfg.idle_timeout_secs = Some(2); // 2 second idle timeout
+        cfg.startup_timeout_secs = Some(10);
+        cfg.health_check_interval_ms = Some(50);
+        cfg.shutdown_grace_period_secs = Some(2);
+        cfg.drain_timeout_secs = Some(5);
+        cfg.ready_health_check_interval_ms = Some(60000); // Long to avoid interference
+        cfg
+    });
 
     let manager = ProcessManager::new(
         configs,
@@ -737,19 +748,16 @@ async fn test_startup_timeout_stops_backend() {
     let port = 30016;
 
     let mut configs = HashMap::new();
-    configs.insert(
-        "timeout.local".to_string(),
-        {
-            let mut cfg = BackendConfig::local("sleep", port); // sleep doesn't listen on any port
-            cfg.args = vec!["60".to_string()];
-            cfg.health_path = Some("/health".to_string());
-            cfg.startup_timeout_secs = Some(1); // 1 second timeout
-            cfg.health_check_interval_ms = Some(100);
-            cfg.shutdown_grace_period_secs = Some(1);
-            cfg.drain_timeout_secs = Some(1);
-            cfg
-        },
-    );
+    configs.insert("timeout.local".to_string(), {
+        let mut cfg = BackendConfig::local("sleep", port); // sleep doesn't listen on any port
+        cfg.args = vec!["60".to_string()];
+        cfg.health_path = Some("/health".to_string());
+        cfg.startup_timeout_secs = Some(1); // 1 second timeout
+        cfg.health_check_interval_ms = Some(100);
+        cfg.shutdown_grace_period_secs = Some(1);
+        cfg.drain_timeout_secs = Some(1);
+        cfg
+    });
 
     let manager = ProcessManager::new(
         configs,
@@ -796,18 +804,28 @@ async fn test_concurrent_requests_while_starting() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start servers
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -829,19 +847,9 @@ async fn test_concurrent_requests_while_starting() {
     // All requests should succeed
     for handle in handles {
         let (i, result) = handle.await.unwrap();
-        assert!(
-            result.is_ok(),
-            "Request {} failed: {:?}",
-            i,
-            result.err()
-        );
+        assert!(result.is_ok(), "Request {} failed: {:?}", i, result.err());
         let response = result.unwrap();
-        assert!(
-            response.contains("200 OK"),
-            "Request {} got: {}",
-            i,
-            response
-        );
+        assert!(response.contains("200 OK"), "Request {i} got: {response}");
     }
 
     // Cleanup
@@ -868,8 +876,14 @@ async fn test_multiple_backends_through_proxy() {
     let backend_b_port = 30023;
 
     let mut configs = HashMap::new();
-    configs.insert("backend-a.local".to_string(), mock_backend_config(backend_a_port));
-    configs.insert("backend-b.local".to_string(), mock_backend_config(backend_b_port));
+    configs.insert(
+        "backend-a.local".to_string(),
+        mock_backend_config(backend_a_port),
+    );
+    configs.insert(
+        "backend-b.local".to_string(),
+        mock_backend_config(backend_b_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -877,18 +891,28 @@ async fn test_multiple_backends_through_proxy() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start servers
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -945,8 +969,13 @@ async fn test_proxy_missing_host_header() {
         "http://127.0.0.1:9999".to_string(),
     );
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -954,7 +983,7 @@ async fn test_proxy_missing_host_header() {
     assert!(wait_for_port(proxy_port, Duration::from_secs(2)).await);
 
     // Send request without Host header
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{proxy_port}"))
         .await
         .unwrap();
     let request = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
@@ -966,8 +995,7 @@ async fn test_proxy_missing_host_header() {
     // Should return 400 Bad Request
     assert!(
         response.contains("400") || response.contains("Bad Request"),
-        "Response: {}",
-        response
+        "Response: {response}"
     );
 
     proxy_handle.abort();
@@ -993,17 +1021,27 @@ async fn test_post_request_with_body() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -1012,7 +1050,7 @@ async fn test_post_request_with_body() {
     assert!(wait_for_port(proxy_port, Duration::from_secs(2)).await);
 
     // Send POST request with body
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{proxy_port}"))
         .await
         .unwrap();
     let body = r#"{"test": "data"}"#;
@@ -1027,7 +1065,7 @@ async fn test_post_request_with_body() {
     stream.read_to_string(&mut response).await.unwrap();
 
     // Should get successful response
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
 
     // Cleanup
     manager.stop_all().await;
@@ -1048,7 +1086,10 @@ async fn test_response_headers_preserved() {
     let backend_port = 30130;
 
     let mut configs = HashMap::new();
-    configs.insert("headers.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "headers.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -1056,17 +1097,27 @@ async fn test_response_headers_preserved() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -1083,8 +1134,7 @@ async fn test_response_headers_preserved() {
     let response_lower = response.to_lowercase();
     assert!(
         response_lower.contains("x-mock-server: true"),
-        "Response missing custom header: {}",
-        response
+        "Response missing custom header: {response}"
     );
 
     // Cleanup
@@ -1108,11 +1158,16 @@ async fn test_admin_api_health_endpoint() {
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx, "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx,
+        "test-token".to_string(),
+    );
 
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
@@ -1122,8 +1177,8 @@ async fn test_admin_api_health_endpoint() {
 
     // Call admin health endpoint
     let response = http_get(admin_port, "/health").await.unwrap();
-    assert!(response.contains("200 OK"), "Response: {}", response);
-    assert!(response.contains("ok"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
+    assert!(response.contains("ok"), "Response: {response}");
 
     let _ = shutdown_tx.send(true);
     let _ = admin_handle.await;
@@ -1139,11 +1194,16 @@ async fn test_admin_api_ready_unknown_backend() {
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx, "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx,
+        "test-token".to_string(),
+    );
 
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
@@ -1152,12 +1212,11 @@ async fn test_admin_api_ready_unknown_backend() {
     assert!(wait_for_port(admin_port, Duration::from_secs(2)).await);
 
     // Call ready for unknown backend
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", admin_port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{admin_port}"))
         .await
         .unwrap();
     let request = format!(
-        "POST /ready/unknown.backend HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer test-token\r\nContent-Length: 0\r\n\r\n",
-        admin_port
+        "POST /ready/unknown.backend HTTP/1.1\r\nHost: 127.0.0.1:{admin_port}\r\nAuthorization: Bearer test-token\r\nContent-Length: 0\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).await.unwrap();
 
@@ -1168,8 +1227,7 @@ async fn test_admin_api_ready_unknown_backend() {
     // Should return 404
     assert!(
         response_str.contains("404") || response_str.contains("not starting"),
-        "Response: {}",
-        response_str
+        "Response: {response_str}"
     );
 
     let _ = shutdown_tx.send(true);
@@ -1200,17 +1258,27 @@ async fn test_backend_returns_error_status() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -1226,8 +1294,7 @@ async fn test_backend_returns_error_status() {
     // Should pass through the 500 error
     assert!(
         response.contains("500") || response.contains("Internal Server Error"),
-        "Response: {}",
-        response
+        "Response: {response}"
     );
 
     // Cleanup
@@ -1313,18 +1380,28 @@ async fn test_drain_mode_rejects_new_requests() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start servers
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -1360,9 +1437,10 @@ async fn test_drain_mode_rejects_new_requests() {
         .await
         .unwrap();
     assert!(
-        response.contains("503") || response.contains("Service Unavailable") || response.contains("shutting down"),
-        "Expected 503, got: {}",
-        response
+        response.contains("503")
+            || response.contains("Service Unavailable")
+            || response.contains("shutting down"),
+        "Expected 503, got: {response}"
     );
 
     // Complete the in-flight request
@@ -1437,13 +1515,11 @@ async fn test_graceful_shutdown_waits_for_drain() {
     // (at least 200ms for our sleep, but less than drain timeout)
     assert!(
         shutdown_duration >= Duration::from_millis(200),
-        "Shutdown should have waited for drain: {:?}",
-        shutdown_duration
+        "Shutdown should have waited for drain: {shutdown_duration:?}"
     );
     assert!(
         shutdown_duration < Duration::from_secs(5),
-        "Shutdown took too long: {:?}",
-        shutdown_duration
+        "Shutdown took too long: {shutdown_duration:?}"
     );
 
     assert_eq!(manager.get_state("graceful.local"), BackendState::Stopped);
@@ -1462,14 +1538,23 @@ async fn test_shutdown_grace_period_config() {
     backend.shutdown_grace_period_secs = Some(3);
     backend.drain_timeout_secs = Some(15);
 
-    assert_eq!(backend.shutdown_grace_period(&defaults), Duration::from_secs(3));
+    assert_eq!(
+        backend.shutdown_grace_period(&defaults),
+        Duration::from_secs(3)
+    );
     assert_eq!(backend.drain_timeout(&defaults), Duration::from_secs(15));
 
     // Fallback to defaults
     let backend_default = BackendConfig::local("test", 3000);
 
-    assert_eq!(backend_default.shutdown_grace_period(&defaults), Duration::from_secs(10));
-    assert_eq!(backend_default.drain_timeout(&defaults), Duration::from_secs(30));
+    assert_eq!(
+        backend_default.shutdown_grace_period(&defaults),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        backend_default.drain_timeout(&defaults),
+        Duration::from_secs(30)
+    );
 }
 
 // ============================================================================
@@ -1545,7 +1630,10 @@ async fn test_proxy_with_custom_pool_config() {
     let backend_port = 30052;
 
     let mut configs = HashMap::new();
-    configs.insert("pooltest.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "pooltest.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -1553,18 +1641,23 @@ async fn test_proxy_with_custom_pool_config() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Start proxy server with custom pool config
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
     let pool_config = PoolConfig {
         max_idle_per_host: 5,
         idle_timeout: Duration::from_secs(30),
@@ -1596,7 +1689,7 @@ async fn test_proxy_with_custom_pool_config() {
         .unwrap();
 
     // Should get response from backend
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
 
     // Cleanup
     manager.stop_all().await;
@@ -1625,18 +1718,23 @@ async fn test_connection_pool_stats() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Start proxy server
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
     let pool_config = PoolConfig::default();
     let proxy_server = ProxyServer::with_pool_config(
         proxy_addr,
@@ -1692,8 +1790,14 @@ async fn test_multiple_backends_use_pool() {
     let backend_b_port = 30059;
 
     let mut configs = HashMap::new();
-    configs.insert("pool-a.local".to_string(), mock_backend_config(backend_a_port));
-    configs.insert("pool-b.local".to_string(), mock_backend_config(backend_b_port));
+    configs.insert(
+        "pool-a.local".to_string(),
+        mock_backend_config(backend_a_port),
+    );
+    configs.insert(
+        "pool-b.local".to_string(),
+        mock_backend_config(backend_b_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -1701,18 +1805,23 @@ async fn test_multiple_backends_use_pool() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Start proxy with pool
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
     let pool_config = PoolConfig {
         max_idle_per_host: 5,
         idle_timeout: Duration::from_secs(60),
@@ -1775,7 +1884,10 @@ async fn test_concurrent_requests_through_pool() {
     let backend_port = 30062;
 
     let mut configs = HashMap::new();
-    configs.insert("concurrent-pool.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "concurrent-pool.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -1783,18 +1895,23 @@ async fn test_concurrent_requests_through_pool() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Start proxy with pool configured for concurrent connections
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
     let pool_config = PoolConfig {
         max_idle_per_host: 10,
         idle_timeout: Duration::from_secs(30),
@@ -1833,7 +1950,7 @@ async fn test_concurrent_requests_through_pool() {
         let (i, result) = handle.await.unwrap();
         assert!(result.is_ok(), "Request {} failed: {:?}", i, result.err());
         let response = result.unwrap();
-        assert!(response.contains("200 OK"), "Request {} got: {}", i, response);
+        assert!(response.contains("200 OK"), "Request {i} got: {response}");
     }
 
     // All requests should be tracked
@@ -1870,17 +1987,27 @@ async fn test_json_error_response_unknown_host() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -1894,15 +2021,17 @@ async fn test_json_error_response_unknown_host() {
         .unwrap();
 
     // Should get JSON error with 404
-    assert!(response.contains("404"), "Response: {}", response);
-    assert!(response.contains("application/json"), "Response: {}", response);
+    assert!(response.contains("404"), "Response: {response}");
+    assert!(
+        response.contains("application/json"),
+        "Response: {response}"
+    );
     // Check for X-Proxy-Error header (case-insensitive)
     assert!(
         response.contains("X-Proxy-Error") || response.contains("x-proxy-error"),
-        "Response should contain X-Proxy-Error header: {}",
-        response
+        "Response should contain X-Proxy-Error header: {response}"
     );
-    assert!(response.contains("UNKNOWN_HOST"), "Response: {}", response);
+    assert!(response.contains("UNKNOWN_HOST"), "Response: {response}");
 
     // Cleanup
     manager.stop_all().await;
@@ -1931,17 +2060,27 @@ async fn test_json_error_response_missing_host() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -1950,7 +2089,7 @@ async fn test_json_error_response_missing_host() {
     assert!(wait_for_port(proxy_port, Duration::from_secs(2)).await);
 
     // Request without Host header using Connection: close to get proper EOF
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{proxy_port}"))
         .await
         .unwrap();
 
@@ -1960,18 +2099,23 @@ async fn test_json_error_response_missing_host() {
 
     // Read response with timeout
     let mut response = vec![0u8; 4096];
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        stream.read(&mut response)
-    ).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response)).await;
 
-    let n = result.expect("Timeout reading response").expect("Failed to read response");
+    let n = result
+        .expect("Timeout reading response")
+        .expect("Failed to read response");
     let response = String::from_utf8_lossy(&response[..n]).to_string();
 
     // Should get JSON error with 400
-    assert!(response.contains("400"), "Response: {}", response);
-    assert!(response.contains("application/json"), "Response: {}", response);
-    assert!(response.contains("MISSING_HOST_HEADER"), "Response: {}", response);
+    assert!(response.contains("400"), "Response: {response}");
+    assert!(
+        response.contains("application/json"),
+        "Response: {response}"
+    );
+    assert!(
+        response.contains("MISSING_HOST_HEADER"),
+        "Response: {response}"
+    );
 
     // Cleanup
     manager.stop_all().await;
@@ -2049,7 +2193,10 @@ async fn test_unhealthy_backend_rejected() {
     let backend_port = 30078;
 
     let mut configs = HashMap::new();
-    configs.insert("unhealthy.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "unhealthy.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2057,17 +2204,27 @@ async fn test_unhealthy_backend_rejected() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2083,14 +2240,20 @@ async fn test_unhealthy_backend_rejected() {
 
     // Mark the backend as unhealthy
     manager.mark_unhealthy("unhealthy.local");
-    assert_eq!(manager.get_state("unhealthy.local"), BackendState::Unhealthy);
+    assert_eq!(
+        manager.get_state("unhealthy.local"),
+        BackendState::Unhealthy
+    );
 
     // Request to unhealthy backend should fail with 503
     let response = http_get_with_host(proxy_port, "/echo", "unhealthy.local")
         .await
         .unwrap();
-    assert!(response.contains("503"), "Response: {}", response);
-    assert!(response.contains("BACKEND_UNHEALTHY"), "Response: {}", response);
+    assert!(response.contains("503"), "Response: {response}");
+    assert!(
+        response.contains("BACKEND_UNHEALTHY"),
+        "Response: {response}"
+    );
 
     // Cleanup
     manager.stop_all().await;
@@ -2098,7 +2261,6 @@ async fn test_unhealthy_backend_rejected() {
     let _ = admin_handle.await;
     let _ = proxy_handle.await;
 }
-
 
 // ============================================================================
 // Request Header Tests
@@ -2111,17 +2273,15 @@ async fn http_get_with_timeout(
     host: &str,
     extra_headers: &[(&str, &str)],
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await?;
 
     let mut header_str = String::new();
     for (name, value) in extra_headers {
-        header_str.push_str(&format!("{}: {}\r\n", name, value));
+        header_str.push_str(&format!("{name}: {value}\r\n"));
     }
 
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
-        path, host, header_str
-    );
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{header_str}Connection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
 
     // Read with timeout to avoid hanging
@@ -2148,7 +2308,10 @@ async fn test_x_request_id_header_generated() {
     let backend_port = 30112;
 
     let mut configs = HashMap::new();
-    configs.insert("header-test.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "header-test.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2156,17 +2319,27 @@ async fn test_x_request_id_header_generated() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2179,12 +2352,11 @@ async fn test_x_request_id_header_generated() {
         .await
         .unwrap();
 
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
     // Backend should receive x-request-id header
     assert!(
         response.to_lowercase().contains("x-request-id"),
-        "Response should contain x-request-id: {}",
-        response
+        "Response should contain x-request-id: {response}"
     );
 
     // Cleanup
@@ -2207,7 +2379,10 @@ async fn test_x_request_id_header_propagated() {
     let backend_port = 30115;
 
     let mut configs = HashMap::new();
-    configs.insert("header-test.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "header-test.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2215,17 +2390,27 @@ async fn test_x_request_id_header_propagated() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2244,13 +2429,11 @@ async fn test_x_request_id_header_propagated() {
     .await
     .unwrap();
 
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
     // Backend should receive our custom x-request-id
     assert!(
         response.contains(custom_id),
-        "Response should contain custom request id '{}': {}",
-        custom_id,
-        response
+        "Response should contain custom request id '{custom_id}': {response}"
     );
 
     // Cleanup
@@ -2273,7 +2456,10 @@ async fn test_x_forwarded_for_header() {
     let backend_port = 30118;
 
     let mut configs = HashMap::new();
-    configs.insert("forward-test.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "forward-test.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2281,17 +2467,27 @@ async fn test_x_forwarded_for_header() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2304,17 +2500,15 @@ async fn test_x_forwarded_for_header() {
         .await
         .unwrap();
 
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
     // Backend should receive x-forwarded-for with client IP (127.0.0.1)
     assert!(
         response.to_lowercase().contains("x-forwarded-for"),
-        "Response should contain x-forwarded-for: {}",
-        response
+        "Response should contain x-forwarded-for: {response}"
     );
     assert!(
         response.contains("127.0.0.1"),
-        "x-forwarded-for should contain client IP 127.0.0.1: {}",
-        response
+        "x-forwarded-for should contain client IP 127.0.0.1: {response}"
     );
 
     // Cleanup
@@ -2337,7 +2531,10 @@ async fn test_x_forwarded_host_header() {
     let backend_port = 30121;
 
     let mut configs = HashMap::new();
-    configs.insert("myapp.example.com".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "myapp.example.com".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2345,17 +2542,27 @@ async fn test_x_forwarded_host_header() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2368,17 +2575,15 @@ async fn test_x_forwarded_host_header() {
         .await
         .unwrap();
 
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
     // Backend should receive x-forwarded-host with original host
     assert!(
         response.to_lowercase().contains("x-forwarded-host"),
-        "Response should contain x-forwarded-host: {}",
-        response
+        "Response should contain x-forwarded-host: {response}"
     );
     assert!(
         response.contains("myapp.example.com"),
-        "x-forwarded-host should contain original host: {}",
-        response
+        "x-forwarded-host should contain original host: {response}"
     );
 
     // Cleanup
@@ -2401,7 +2606,10 @@ async fn test_x_forwarded_proto_header() {
     let backend_port = 30124;
 
     let mut configs = HashMap::new();
-    configs.insert("proto-test.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "proto-test.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2409,17 +2617,27 @@ async fn test_x_forwarded_proto_header() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2432,19 +2650,17 @@ async fn test_x_forwarded_proto_header() {
         .await
         .unwrap();
 
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
     // Backend should receive x-forwarded-proto set to http
     let response_lower = response.to_lowercase();
     assert!(
         response_lower.contains("x-forwarded-proto"),
-        "Response should contain x-forwarded-proto: {}",
-        response
+        "Response should contain x-forwarded-proto: {response}"
     );
     // The JSON format will be "x-forwarded-proto":"http"
     assert!(
         response_lower.contains("x-forwarded-proto\":\"http"),
-        "x-forwarded-proto should be 'http': {}",
-        response
+        "x-forwarded-proto should be 'http': {response}"
     );
 
     // Cleanup
@@ -2467,7 +2683,10 @@ async fn test_x_forwarded_for_appends() {
     let backend_port = 30127;
 
     let mut configs = HashMap::new();
-    configs.insert("append-test.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "append-test.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2475,17 +2694,27 @@ async fn test_x_forwarded_for_appends() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2503,19 +2732,17 @@ async fn test_x_forwarded_for_appends() {
     .await
     .unwrap();
 
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
     // Security: The client-provided IP should be overwritten, not appended
     // Only the actual client IP (127.0.0.1) should be present
     assert!(
         response.contains("127.0.0.1"),
-        "Response should contain actual client IP: {}",
-        response
+        "Response should contain actual client IP: {response}"
     );
     // The spoofed IP should NOT be in the header (it was overwritten)
     assert!(
         !response.contains("x-forwarded-for: 10.0.0.1"),
-        "Spoofed X-Forwarded-For should be overwritten: {}",
-        response
+        "Spoofed X-Forwarded-For should be overwritten: {response}"
     );
 
     // Cleanup
@@ -2538,14 +2765,15 @@ async fn test_admin_version_endpoint() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
 
-    let manager = ProcessManager::new(
-        configs,
-        defaults,
-        format!("http://127.0.0.1:{}", admin_port),
-    );
+    let manager = ProcessManager::new(configs, defaults, format!("http://127.0.0.1:{admin_port}"));
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx, "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx,
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
@@ -2554,21 +2782,18 @@ async fn test_admin_version_endpoint() {
 
     // Request /version
     let response = http_get(admin_port, "/version").await.unwrap();
-    assert!(response.contains("200 OK"), "Response: {}", response);
+    assert!(response.contains("200 OK"), "Response: {response}");
     assert!(
         response.contains("application/json"),
-        "Should return JSON: {}",
-        response
+        "Should return JSON: {response}"
     );
     assert!(
         response.contains("spawngate"),
-        "Should contain package name: {}",
-        response
+        "Should contain package name: {response}"
     );
     assert!(
         response.contains("version"),
-        "Should contain version field: {}",
-        response
+        "Should contain version field: {response}"
     );
 
     // Cleanup
@@ -2585,7 +2810,7 @@ const WS_MAGIC_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Compute Sec-WebSocket-Accept from client key
 fn compute_ws_accept(key: &str) -> String {
-    use sha1::{Sha1, Digest};
+    use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();
     hasher.update(key.as_bytes());
     hasher.update(WS_MAGIC_GUID.as_bytes());
@@ -2599,49 +2824,50 @@ async fn websocket_handshake(
     host: &str,
     path: &str,
 ) -> Result<TcpStream, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await?;
 
     // Generate a random key for the WebSocket handshake
     let key = "dGhlIHNhbXBsZSBub25jZQ==";
 
     let request = format!(
-        "GET {} HTTP/1.1\r\n\
-         Host: {}\r\n\
+        "GET {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
-         Sec-WebSocket-Key: {}\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
          Sec-WebSocket-Version: 13\r\n\
-         \r\n",
-        path, host, key
+         \r\n"
     );
 
     stream.write_all(request.as_bytes()).await?;
 
     // Read response
     let mut response = vec![0u8; 4096];
-    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut response))
-        .await??;
+    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut response)).await??;
 
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     if !response_str.contains("101 Switching Protocols") {
-        return Err(format!("WebSocket handshake failed: {}", response_str).into());
+        return Err(format!("WebSocket handshake failed: {response_str}").into());
     }
 
     // Verify the accept key
     let expected_accept = compute_ws_accept(key);
     if !response_str.contains(&expected_accept) {
         return Err(format!(
-            "Invalid Sec-WebSocket-Accept. Expected '{}', got: {}",
-            expected_accept, response_str
-        ).into());
+            "Invalid Sec-WebSocket-Accept. Expected '{expected_accept}', got: {response_str}"
+        )
+        .into());
     }
 
     Ok(stream)
 }
 
 /// Send a WebSocket text frame
-async fn send_ws_text(stream: &mut TcpStream, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn send_ws_text(
+    stream: &mut TcpStream,
+    text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let payload = text.as_bytes();
     let mut frame = Vec::new();
 
@@ -2679,7 +2905,7 @@ async fn recv_ws_text(stream: &mut TcpStream) -> Result<String, Box<dyn std::err
 
     let opcode = header[0] & 0x0F;
     if opcode != 0x1 {
-        return Err(format!("Expected text frame (opcode 1), got {}", opcode).into());
+        return Err(format!("Expected text frame (opcode 1), got {opcode}").into());
     }
 
     let mut payload_len = (header[1] & 0x7F) as u64;
@@ -2731,17 +2957,27 @@ async fn test_websocket_upgrade_through_proxy() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2751,12 +2987,18 @@ async fn test_websocket_upgrade_through_proxy() {
 
     // Perform WebSocket handshake through proxy
     let result = websocket_handshake(proxy_port, "ws.local", "/ws").await;
-    assert!(result.is_ok(), "WebSocket handshake failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "WebSocket handshake failed: {:?}",
+        result.err()
+    );
 
     let mut ws_stream = result.unwrap();
 
     // Send a message
-    send_ws_text(&mut ws_stream, "Hello WebSocket!").await.unwrap();
+    send_ws_text(&mut ws_stream, "Hello WebSocket!")
+        .await
+        .unwrap();
 
     // Receive echo
     let response = recv_ws_text(&mut ws_stream).await.unwrap();
@@ -2788,7 +3030,10 @@ async fn test_websocket_multiple_messages() {
     let backend_port = 30205;
 
     let mut configs = HashMap::new();
-    configs.insert("ws-multi.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "ws-multi.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2796,17 +3041,27 @@ async fn test_websocket_multiple_messages() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2825,7 +3080,7 @@ async fn test_websocket_multiple_messages() {
     for msg in &messages {
         send_ws_text(&mut ws_stream, msg).await.unwrap();
         let response = recv_ws_text(&mut ws_stream).await.unwrap();
-        assert_eq!(&response, *msg, "Echo mismatch for message: {}", msg);
+        assert_eq!(&response, *msg, "Echo mismatch for message: {msg}");
     }
 
     // Close connection
@@ -2851,7 +3106,10 @@ async fn test_websocket_in_flight_tracking() {
     let backend_port = 30208;
 
     let mut configs = HashMap::new();
-    configs.insert("ws-track.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "ws-track.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -2859,17 +3117,27 @@ async fn test_websocket_in_flight_tracking() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -2889,7 +3157,11 @@ async fn test_websocket_in_flight_tracking() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // In-flight should be 1 while WebSocket is connected
-    assert_eq!(manager.get_in_flight("ws-track.local"), 1, "WebSocket should be tracked as in-flight");
+    assert_eq!(
+        manager.get_in_flight("ws-track.local"),
+        1,
+        "WebSocket should be tracked as in-flight"
+    );
 
     // Close connection
     send_ws_close(&mut ws_stream).await.unwrap();
@@ -2899,7 +3171,11 @@ async fn test_websocket_in_flight_tracking() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // In-flight should be back to 0
-    assert_eq!(manager.get_in_flight("ws-track.local"), 0, "In-flight should be 0 after WebSocket closes");
+    assert_eq!(
+        manager.get_in_flight("ws-track.local"),
+        0,
+        "In-flight should be 0 after WebSocket closes"
+    );
 
     // Cleanup
     manager.stop_all().await;
@@ -2920,14 +3196,14 @@ async fn http2_request(
 ) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
     use h2::client;
 
-    let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+    let stream = TcpStream::connect(format!("127.0.0.1:{port}")).await?;
 
     let (h2, connection) = client::handshake(stream).await?;
 
     // Spawn connection driver
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("HTTP/2 connection error: {}", e);
+            eprintln!("HTTP/2 connection error: {e}");
         }
     });
 
@@ -2935,7 +3211,7 @@ async fn http2_request(
 
     let request = http::Request::builder()
         .method(http::Method::GET)
-        .uri(format!("http://{}{}", host, path))
+        .uri(format!("http://{host}{path}"))
         .header("host", host)
         .body(())?;
 
@@ -2977,17 +3253,27 @@ async fn test_http2_request_through_proxy() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -3000,8 +3286,8 @@ async fn test_http2_request_through_proxy() {
     assert!(result.is_ok(), "HTTP/2 request failed: {:?}", result.err());
 
     let (status, body) = result.unwrap();
-    assert_eq!(status, 200, "Expected 200, got {}", status);
-    assert!(body.contains("echo"), "Unexpected body: {}", body);
+    assert_eq!(status, 200, "Expected 200, got {status}");
+    assert!(body.contains("echo"), "Unexpected body: {body}");
 
     // Cleanup
     manager.stop_all().await;
@@ -3023,7 +3309,10 @@ async fn test_http2_multiplexed_requests() {
     let backend_port = 30305;
 
     let mut configs = HashMap::new();
-    configs.insert("h2-multi.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "h2-multi.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -3031,17 +3320,27 @@ async fn test_http2_multiplexed_requests() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -3052,7 +3351,7 @@ async fn test_http2_multiplexed_requests() {
     // Send multiple HTTP/2 requests on the same connection
     use h2::client;
 
-    let stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port))
+    let stream = TcpStream::connect(format!("127.0.0.1:{proxy_port}"))
         .await
         .unwrap();
 
@@ -3060,7 +3359,7 @@ async fn test_http2_multiplexed_requests() {
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("HTTP/2 connection error: {}", e);
+            eprintln!("HTTP/2 connection error: {e}");
         }
     });
 
@@ -3071,7 +3370,7 @@ async fn test_http2_multiplexed_requests() {
     for i in 0..5 {
         let request = http::Request::builder()
             .method(http::Method::GET)
-            .uri(format!("http://h2-multi.local/echo?n={}", i))
+            .uri(format!("http://h2-multi.local/echo?n={i}"))
             .header("host", "h2-multi.local")
             .body(())
             .unwrap();
@@ -3087,7 +3386,10 @@ async fn test_http2_multiplexed_requests() {
             while let Some(chunk) = body_stream.data().await {
                 let chunk = chunk.unwrap();
                 body.push_str(&String::from_utf8_lossy(&chunk));
-                body_stream.flow_control().release_capacity(chunk.len()).unwrap();
+                body_stream
+                    .flow_control()
+                    .release_capacity(chunk.len())
+                    .unwrap();
             }
 
             (i, status, body)
@@ -3100,8 +3402,11 @@ async fn test_http2_multiplexed_requests() {
     // All requests should succeed
     for handle in handles {
         let (i, status, body) = handle.await.unwrap();
-        assert_eq!(status, 200, "Request {} got status {}", i, status);
-        assert!(body.contains("Hello") || body.contains("echo") || body.contains("mock"), "Request {} got body: {}", i, body);
+        assert_eq!(status, 200, "Request {i} got status {status}");
+        assert!(
+            body.contains("Hello") || body.contains("echo") || body.contains("mock"),
+            "Request {i} got body: {body}"
+        );
     }
 
     // Cleanup
@@ -3122,11 +3427,16 @@ async fn test_http2_admin_api() {
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx, "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx,
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
@@ -3136,7 +3446,7 @@ async fn test_http2_admin_api() {
     // Send HTTP/2 request to admin health endpoint
     use h2::client;
 
-    let stream = TcpStream::connect(format!("127.0.0.1:{}", admin_port))
+    let stream = TcpStream::connect(format!("127.0.0.1:{admin_port}"))
         .await
         .unwrap();
 
@@ -3144,7 +3454,7 @@ async fn test_http2_admin_api() {
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("HTTP/2 connection error: {}", e);
+            eprintln!("HTTP/2 connection error: {e}");
         }
     });
 
@@ -3167,7 +3477,10 @@ async fn test_http2_admin_api() {
     while let Some(chunk) = body_stream.data().await {
         let chunk = chunk.unwrap();
         body.push_str(&String::from_utf8_lossy(&chunk));
-        body_stream.flow_control().release_capacity(chunk.len()).unwrap();
+        body_stream
+            .flow_control()
+            .release_capacity(chunk.len())
+            .unwrap();
     }
 
     assert_eq!(body, "ok");
@@ -3190,7 +3503,7 @@ async fn test_backends_endpoint() {
     let process_manager = ProcessManager::new(
         backends,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -3210,7 +3523,9 @@ async fn test_backends_endpoint() {
     );
 
     // Request the backends endpoint (requires auth)
-    let response = http_get_with_auth(admin_port, "/backends", "test-token").await.unwrap();
+    let response = http_get_with_auth(admin_port, "/backends", "test-token")
+        .await
+        .unwrap();
 
     // Parse response
     let body_start = response.find("\r\n\r\n").unwrap() + 4;
@@ -3252,7 +3567,7 @@ async fn test_backends_endpoint_with_running_backend() {
     let process_manager = ProcessManager::new(
         backends,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     let _defaults = BackendDefaults::default();
@@ -3287,13 +3602,17 @@ async fn test_backends_endpoint_with_running_backend() {
     );
 
     // Make a request to start the backend
-    let _response = http_get_with_host(proxy_port, "/", "test.local").await.unwrap();
+    let _response = http_get_with_host(proxy_port, "/", "test.local")
+        .await
+        .unwrap();
 
     // Small delay to ensure state is updated
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Check backends endpoint
-    let response = http_get_with_auth(admin_port, "/backends", "test-token").await.unwrap();
+    let response = http_get_with_auth(admin_port, "/backends", "test-token")
+        .await
+        .unwrap();
     let body_start = response.find("\r\n\r\n").unwrap() + 4;
     let body = &response[body_start..];
 
@@ -3357,12 +3676,14 @@ async fn test_tls_proxy() {
         }
     };
 
-    let tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .unwrap();
+    let tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .unwrap();
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     let proxy_port = 30400;
@@ -3370,7 +3691,10 @@ async fn test_tls_proxy() {
     let backend_port = 30402;
 
     let mut configs = HashMap::new();
-    configs.insert("tls-test.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "tls-test.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -3378,18 +3702,28 @@ async fn test_tls_proxy() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx)
-        .with_tls(tls_acceptor);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    )
+    .with_tls(tls_acceptor);
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -3405,15 +3739,17 @@ async fn test_tls_proxy() {
         root_store.add(cert.unwrap()).unwrap();
     }
 
-    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
 
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
 
-    let stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port))
+    let stream = TcpStream::connect(format!("127.0.0.1:{proxy_port}"))
         .await
         .unwrap();
 
@@ -3427,8 +3763,14 @@ async fn test_tls_proxy() {
     let mut response = String::new();
     tls_stream.read_to_string(&mut response).await.unwrap();
 
-    assert!(response.contains("200 OK"), "Expected 200 OK, got: {}", response);
-    assert!(response.contains("Hello"), "Expected Hello in response, got: {}", response);
+    assert!(
+        response.contains("200 OK"),
+        "Expected 200 OK, got: {response}"
+    );
+    assert!(
+        response.contains("Hello"),
+        "Expected Hello in response, got: {response}"
+    );
 
     // Cleanup
     manager.stop_all().await;
@@ -3446,7 +3788,10 @@ async fn test_https_redirect() {
     let backend_port = 30503;
 
     let mut configs = HashMap::new();
-    configs.insert("redirect-test.local".to_string(), mock_backend_config(backend_port));
+    configs.insert(
+        "redirect-test.local".to_string(),
+        mock_backend_config(backend_port),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let defaults = BackendDefaults::default();
@@ -3454,19 +3799,29 @@ async fn test_https_redirect() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Create HTTP proxy with HTTPS redirect enabled
-    let http_addr: SocketAddr = format!("127.0.0.1:{}", http_port).parse().unwrap();
-    let http_proxy = ProxyServer::new(http_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx.clone())
-        .with_https_redirect(https_port);
+    let http_addr: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
+    let http_proxy = ProxyServer::new(
+        http_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx.clone(),
+    )
+    .with_https_redirect(https_port);
     let http_proxy_handle = tokio::spawn(async move {
         let _ = http_proxy.run().await;
     });
@@ -3475,7 +3830,7 @@ async fn test_https_redirect() {
     assert!(wait_for_port(http_port, Duration::from_secs(2)).await);
 
     // Send HTTP request - should get 301 redirect
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", http_port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{http_port}"))
         .await
         .unwrap();
 
@@ -3485,11 +3840,15 @@ async fn test_https_redirect() {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
 
-    assert!(response.contains("301 Moved Permanently"), "Expected 301, got: {}", response);
     assert!(
-        response.contains(&format!("https://redirect-test.local:{}/some/path?query=value", https_port)),
-        "Expected redirect to HTTPS with path preserved, got: {}",
-        response
+        response.contains("301 Moved Permanently"),
+        "Expected 301, got: {response}"
+    );
+    assert!(
+        response.contains(&format!(
+            "https://redirect-test.local:{https_port}/some/path?query=value"
+        )),
+        "Expected redirect to HTTPS with path preserved, got: {response}"
     );
 
     // Cleanup
@@ -3512,19 +3871,29 @@ async fn test_https_redirect_standard_port() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Create HTTP proxy with HTTPS redirect to standard port 443
-    let http_addr: SocketAddr = format!("127.0.0.1:{}", http_port).parse().unwrap();
-    let http_proxy = ProxyServer::new(http_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx)
-        .with_https_redirect(443);
+    let http_addr: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
+    let http_proxy = ProxyServer::new(
+        http_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    )
+    .with_https_redirect(443);
     let http_proxy_handle = tokio::spawn(async move {
         let _ = http_proxy.run().await;
     });
@@ -3533,7 +3902,7 @@ async fn test_https_redirect_standard_port() {
     assert!(wait_for_port(http_port, Duration::from_secs(2)).await);
 
     // Send HTTP request - should get 301 redirect without port in URL
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", http_port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{http_port}"))
         .await
         .unwrap();
 
@@ -3543,12 +3912,14 @@ async fn test_https_redirect_standard_port() {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
 
-    assert!(response.contains("301 Moved Permanently"), "Expected 301, got: {}", response);
+    assert!(
+        response.contains("301 Moved Permanently"),
+        "Expected 301, got: {response}"
+    );
     // Port 443 should not appear in the redirect URL
     assert!(
         response.contains("https://example.com/") && !response.contains(":443"),
-        "Expected redirect to https://example.com/ without port, got: {}",
-        response
+        "Expected redirect to https://example.com/ without port, got: {response}"
     );
 
     // Cleanup
@@ -3577,7 +3948,7 @@ async fn docker_available() -> bool {
     match DockerManager::new(None).await {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("Docker not available: {}", e);
+            eprintln!("Docker not available: {e}");
             false
         }
     }
@@ -3644,7 +4015,11 @@ async fn test_docker_backend_start_stop() {
 
     // Start the Docker backend
     let result = manager.start_backend("docker.local").await;
-    assert!(result.is_ok(), "Failed to start Docker backend: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to start Docker backend: {:?}",
+        result.err()
+    );
 
     // Should be in Starting state
     assert_eq!(manager.get_state("docker.local"), BackendState::Starting);
@@ -3690,7 +4065,10 @@ async fn test_docker_backend_proxy_request() {
 
     let mut config = docker_backend_config(backend_port);
     config.container_name = Some(container_name.to_string());
-    config.args = vec!["-text=docker-response".to_string(), format!("-listen=:{}", backend_port)];
+    config.args = vec![
+        "-text=docker-response".to_string(),
+        format!("-listen=:{}", backend_port),
+    ];
 
     let mut configs = HashMap::new();
     configs.insert("docker.proxy.local".to_string(), config);
@@ -3701,19 +4079,29 @@ async fn test_docker_backend_proxy_request() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Start proxy server
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -3727,14 +4115,17 @@ async fn test_docker_backend_proxy_request() {
 
     match response {
         Ok(resp) => {
-            assert!(resp.contains("200 OK"), "Expected 200 OK, got: {}", resp);
-            assert!(resp.contains("docker-response"), "Expected docker-response in body, got: {}", resp);
+            assert!(resp.contains("200 OK"), "Expected 200 OK, got: {resp}");
+            assert!(
+                resp.contains("docker-response"),
+                "Expected docker-response in body, got: {resp}"
+            );
         }
         Err(e) => {
             // Clean up before failing
             let _ = shutdown_tx.send(true);
             cleanup_docker_container(container_name).await;
-            panic!("Request failed: {}", e);
+            panic!("Request failed: {e}");
         }
     }
 
@@ -3765,7 +4156,10 @@ async fn test_docker_backend_multiple_requests() {
 
     let mut config = docker_backend_config(backend_port);
     config.container_name = Some(container_name.to_string());
-    config.args = vec!["-text=multi-test".to_string(), format!("-listen=:{}", backend_port)];
+    config.args = vec![
+        "-text=multi-test".to_string(),
+        format!("-listen=:{}", backend_port),
+    ];
 
     let mut configs = HashMap::new();
     configs.insert("docker.multi.local".to_string(), config);
@@ -3776,17 +4170,27 @@ async fn test_docker_backend_multiple_requests() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -3795,14 +4199,28 @@ async fn test_docker_backend_multiple_requests() {
     assert!(wait_for_port(proxy_port, Duration::from_secs(2)).await);
 
     // First request starts the container
-    let response1 = http_get_with_host(proxy_port, "/first", "docker.multi.local").await.unwrap();
-    assert!(response1.contains("200 OK"), "First request failed: {}", response1);
+    let response1 = http_get_with_host(proxy_port, "/first", "docker.multi.local")
+        .await
+        .unwrap();
+    assert!(
+        response1.contains("200 OK"),
+        "First request failed: {response1}"
+    );
 
     // Subsequent requests should use the same container
     for i in 0..5 {
-        let response = http_get_with_host(proxy_port, &format!("/request-{}", i), "docker.multi.local").await.unwrap();
-        assert!(response.contains("200 OK"), "Request {} failed: {}", i, response);
-        assert!(response.contains("multi-test"), "Request {} missing expected body", i);
+        let response =
+            http_get_with_host(proxy_port, &format!("/request-{i}"), "docker.multi.local")
+                .await
+                .unwrap();
+        assert!(
+            response.contains("200 OK"),
+            "Request {i} failed: {response}"
+        );
+        assert!(
+            response.contains("multi-test"),
+            "Request {i} missing expected body"
+        );
     }
 
     // Cleanup
@@ -3827,7 +4245,10 @@ async fn test_docker_backend_stop_removes_container() {
 
     let mut config = docker_backend_config(port);
     config.container_name = Some(container_name.to_string());
-    config.args = vec!["-text=removal-test".to_string(), format!("-listen=:{}", port)];
+    config.args = vec![
+        "-text=removal-test".to_string(),
+        format!("-listen=:{}", port),
+    ];
 
     let mut configs = HashMap::new();
     configs.insert("docker.remove.local".to_string(), config);
@@ -3848,18 +4269,27 @@ async fn test_docker_backend_stop_removes_container() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(manager.get_state("docker.remove.local"), BackendState::Ready);
+    assert_eq!(
+        manager.get_state("docker.remove.local"),
+        BackendState::Ready
+    );
 
     // Verify container is running
     let docker = DockerManager::new(None).await.unwrap();
-    assert!(docker.is_running(container_name).await, "Container should be running");
+    assert!(
+        docker.is_running(container_name).await,
+        "Container should be running"
+    );
 
     // Stop the backend
     manager.stop_backend("docker.remove.local").await;
 
     // Container should be removed
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!docker.is_running(container_name).await, "Container should be stopped");
+    assert!(
+        !docker.is_running(container_name).await,
+        "Container should be stopped"
+    );
 
     cleanup_docker_container(container_name).await;
 }
@@ -3887,7 +4317,10 @@ async fn test_docker_and_local_backends_mixed() {
     // Docker backend config
     let mut docker_config = docker_backend_config(docker_port);
     docker_config.container_name = Some(container_name.to_string());
-    docker_config.args = vec!["-text=from-docker".to_string(), format!("-listen=:{}", docker_port)];
+    docker_config.args = vec![
+        "-text=from-docker".to_string(),
+        format!("-listen=:{}", docker_port),
+    ];
 
     // Local backend config
     let local_config = mock_backend_config(local_port);
@@ -3902,17 +4335,27 @@ async fn test_docker_and_local_backends_mixed() {
     let manager = ProcessManager::new(
         configs,
         defaults.clone(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -3921,13 +4364,26 @@ async fn test_docker_and_local_backends_mixed() {
     assert!(wait_for_port(proxy_port, Duration::from_secs(2)).await);
 
     // Request to Docker backend
-    let docker_response = http_get_with_host(proxy_port, "/", "docker.mixed.local").await.unwrap();
-    assert!(docker_response.contains("200 OK"), "Docker request failed: {}", docker_response);
-    assert!(docker_response.contains("from-docker"), "Docker response missing expected body");
+    let docker_response = http_get_with_host(proxy_port, "/", "docker.mixed.local")
+        .await
+        .unwrap();
+    assert!(
+        docker_response.contains("200 OK"),
+        "Docker request failed: {docker_response}"
+    );
+    assert!(
+        docker_response.contains("from-docker"),
+        "Docker response missing expected body"
+    );
 
     // Request to local backend
-    let local_response = http_get_with_host(proxy_port, "/health", "local.mixed.local").await.unwrap();
-    assert!(local_response.contains("200 OK"), "Local request failed: {}", local_response);
+    let local_response = http_get_with_host(proxy_port, "/health", "local.mixed.local")
+        .await
+        .unwrap();
+    assert!(
+        local_response.contains("200 OK"),
+        "Local request failed: {local_response}"
+    );
 
     // Both should be ready
     assert_eq!(manager.get_state("docker.mixed.local"), BackendState::Ready);
@@ -3970,7 +4426,11 @@ async fn test_docker_pull_policy_if_not_present() {
 
     // Start should succeed
     let result = manager.start_backend("docker.pull.local").await;
-    assert!(result.is_ok(), "Failed to start with if-not-present policy: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to start with if-not-present policy: {:?}",
+        result.err()
+    );
 
     // Wait for ready
     let start = std::time::Instant::now();
@@ -4018,7 +4478,10 @@ async fn test_docker_pull_policy_never_missing_image() {
 
     // Start should fail because image doesn't exist and we won't pull
     let result = manager.start_backend("docker.never.local").await;
-    assert!(result.is_err(), "Expected failure with never policy on missing image");
+    assert!(
+        result.is_err(),
+        "Expected failure with never policy on missing image"
+    );
 
     cleanup_docker_container(container_name).await;
 }
@@ -4039,7 +4502,10 @@ async fn test_docker_pull_policy_always() {
     let mut config = docker_backend_config(port);
     config.container_name = Some(container_name.to_string());
     config.pull_policy = spawngate::config::PullPolicy::Always;
-    config.args = vec!["-text=always-pull".to_string(), format!("-listen=:{}", port)];
+    config.args = vec![
+        "-text=always-pull".to_string(),
+        format!("-listen=:{}", port),
+    ];
 
     let mut configs = HashMap::new();
     configs.insert("docker.always.local".to_string(), config);
@@ -4052,7 +4518,11 @@ async fn test_docker_pull_policy_always() {
 
     // Start should succeed (will pull image)
     let result = manager.start_backend("docker.always.local").await;
-    assert!(result.is_ok(), "Failed to start with always policy: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to start with always policy: {:?}",
+        result.err()
+    );
 
     // Wait for ready
     let start = std::time::Instant::now();
@@ -4062,7 +4532,10 @@ async fn test_docker_pull_policy_always() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(manager.get_state("docker.always.local"), BackendState::Ready);
+    assert_eq!(
+        manager.get_state("docker.always.local"),
+        BackendState::Ready
+    );
 
     // Cleanup
     manager.stop_backend("docker.always.local").await;
@@ -4110,7 +4583,10 @@ async fn test_docker_idle_timeout_cleanup() {
 
     // Verify container is running
     let docker = DockerManager::new(None).await.unwrap();
-    assert!(docker.is_running(container_name).await, "Container should be running");
+    assert!(
+        docker.is_running(container_name).await,
+        "Container should be running"
+    );
 
     // Wait for idle timeout
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -4119,11 +4595,17 @@ async fn test_docker_idle_timeout_cleanup() {
     manager.cleanup_idle_backends().await;
 
     // Should be stopped
-    assert_eq!(manager.get_state("docker.idle.local"), BackendState::Stopped);
+    assert_eq!(
+        manager.get_state("docker.idle.local"),
+        BackendState::Stopped
+    );
 
     // Container should be removed
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!docker.is_running(container_name).await, "Container should be stopped after idle timeout");
+    assert!(
+        !docker.is_running(container_name).await,
+        "Container should be stopped after idle timeout"
+    );
 
     cleanup_docker_container(container_name).await;
 }
@@ -4143,7 +4625,10 @@ async fn test_docker_activity_resets_idle_timeout() {
     let mut config = docker_backend_config(port);
     config.container_name = Some(container_name.to_string());
     config.idle_timeout_secs = Some(2); // 2 second idle timeout
-    config.args = vec!["-text=active-test".to_string(), format!("-listen=:{}", port)];
+    config.args = vec![
+        "-text=active-test".to_string(),
+        format!("-listen=:{}", port),
+    ];
     config.ready_health_check_interval_ms = Some(60000);
 
     let mut configs = HashMap::new();
@@ -4165,7 +4650,10 @@ async fn test_docker_activity_resets_idle_timeout() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(manager.get_state("docker.active.local"), BackendState::Ready);
+    assert_eq!(
+        manager.get_state("docker.active.local"),
+        BackendState::Ready
+    );
 
     // Touch periodically to keep it alive
     for _ in 0..3 {
@@ -4215,7 +4703,10 @@ async fn test_docker_startup_timeout() {
 
     // Start the backend
     manager.start_backend("docker.timeout.local").await.unwrap();
-    assert_eq!(manager.get_state("docker.timeout.local"), BackendState::Starting);
+    assert_eq!(
+        manager.get_state("docker.timeout.local"),
+        BackendState::Starting
+    );
 
     // Wait for startup timeout
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -4246,8 +4737,12 @@ async fn test_docker_container_env_vars() {
     config.container_name = Some(container_name.to_string());
     config.args = vec!["-text=env-test".to_string(), format!("-listen=:{}", port)];
     // Add custom env vars
-    config.env.insert("CUSTOM_VAR".to_string(), "custom_value".to_string());
-    config.env.insert("ANOTHER_VAR".to_string(), "another_value".to_string());
+    config
+        .env
+        .insert("CUSTOM_VAR".to_string(), "custom_value".to_string());
+    config
+        .env
+        .insert("ANOTHER_VAR".to_string(), "another_value".to_string());
 
     let mut configs = HashMap::new();
     configs.insert("docker.env.local".to_string(), config);
@@ -4272,7 +4767,10 @@ async fn test_docker_container_env_vars() {
 
     // Verify container is running and responding
     let response = http_get(port, "/").await.unwrap();
-    assert!(response.contains("env-test"), "Container should respond: {}", response);
+    assert!(
+        response.contains("env-test"),
+        "Container should respond: {response}"
+    );
 
     // Cleanup
     manager.stop_backend("docker.env.local").await;
@@ -4293,7 +4791,10 @@ async fn test_docker_resource_limits() {
 
     let mut config = docker_backend_config(port);
     config.container_name = Some(container_name.to_string());
-    config.args = vec!["-text=resource-test".to_string(), format!("-listen=:{}", port)];
+    config.args = vec![
+        "-text=resource-test".to_string(),
+        format!("-listen=:{}", port),
+    ];
     // Set resource limits
     config.memory = Some("64m".to_string());
     config.cpus = Some("0.5".to_string());
@@ -4308,7 +4809,10 @@ async fn test_docker_resource_limits() {
     );
 
     // Start and verify it works with resource limits
-    manager.start_backend("docker.resources.local").await.unwrap();
+    manager
+        .start_backend("docker.resources.local")
+        .await
+        .unwrap();
 
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(30) {
@@ -4317,11 +4821,17 @@ async fn test_docker_resource_limits() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(manager.get_state("docker.resources.local"), BackendState::Ready);
+    assert_eq!(
+        manager.get_state("docker.resources.local"),
+        BackendState::Ready
+    );
 
     // Verify container is running
     let docker = DockerManager::new(None).await.unwrap();
-    assert!(docker.is_running(container_name).await, "Container should be running with resource limits");
+    assert!(
+        docker.is_running(container_name).await,
+        "Container should be running with resource limits"
+    );
 
     // Cleanup
     manager.stop_backend("docker.resources.local").await;
@@ -4342,7 +4852,10 @@ async fn test_docker_restart_after_stop() {
 
     let mut config = docker_backend_config(port);
     config.container_name = Some(container_name.to_string());
-    config.args = vec!["-text=restart-test".to_string(), format!("-listen=:{}", port)];
+    config.args = vec![
+        "-text=restart-test".to_string(),
+        format!("-listen=:{}", port),
+    ];
 
     let mut configs = HashMap::new();
     configs.insert("docker.restart.local".to_string(), config);
@@ -4363,15 +4876,24 @@ async fn test_docker_restart_after_stop() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(manager.get_state("docker.restart.local"), BackendState::Ready);
+    assert_eq!(
+        manager.get_state("docker.restart.local"),
+        BackendState::Ready
+    );
 
     // Verify it's responding
     let response1 = http_get(port, "/").await.unwrap();
-    assert!(response1.contains("restart-test"), "First start should work");
+    assert!(
+        response1.contains("restart-test"),
+        "First start should work"
+    );
 
     // Stop
     manager.stop_backend("docker.restart.local").await;
-    assert_eq!(manager.get_state("docker.restart.local"), BackendState::Stopped);
+    assert_eq!(
+        manager.get_state("docker.restart.local"),
+        BackendState::Stopped
+    );
 
     // Wait a moment
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -4386,11 +4908,17 @@ async fn test_docker_restart_after_stop() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(manager.get_state("docker.restart.local"), BackendState::Ready);
+    assert_eq!(
+        manager.get_state("docker.restart.local"),
+        BackendState::Ready
+    );
 
     // Verify it's responding again
     let response2 = http_get(port, "/").await.unwrap();
-    assert!(response2.contains("restart-test"), "Second start should work");
+    assert!(
+        response2.contains("restart-test"),
+        "Second start should work"
+    );
 
     // Cleanup
     manager.stop_backend("docker.restart.local").await;
@@ -4406,7 +4934,7 @@ async fn test_docker_concurrent_starts() {
 
     let base_port = 31110;
     let container_names: Vec<String> = (0..3)
-        .map(|i| format!("spawngate-test-concurrent-{}", i))
+        .map(|i| format!("spawngate-test-concurrent-{i}"))
         .collect();
 
     // Cleanup first
@@ -4419,8 +4947,11 @@ async fn test_docker_concurrent_starts() {
         let port = base_port + i as u16;
         let mut config = docker_backend_config(port);
         config.container_name = Some(name.clone());
-        config.args = vec![format!("-text=concurrent-{}", i), format!("-listen=:{}", port)];
-        configs.insert(format!("docker.concurrent{}.local", i), config);
+        config.args = vec![
+            format!("-text=concurrent-{}", i),
+            format!("-listen=:{}", port),
+        ];
+        configs.insert(format!("docker.concurrent{i}.local"), config);
     }
 
     let manager = ProcessManager::new(
@@ -4431,28 +4962,32 @@ async fn test_docker_concurrent_starts() {
 
     // Start all backends concurrently
     let hostnames: Vec<String> = (0..3)
-        .map(|i| format!("docker.concurrent{}.local", i))
+        .map(|i| format!("docker.concurrent{i}.local"))
         .collect();
 
     let mut handles = vec![];
     for hostname in &hostnames {
         let m = Arc::clone(&manager);
         let h = hostname.clone();
-        handles.push(tokio::spawn(async move {
-            m.start_backend(&h).await
-        }));
+        handles.push(tokio::spawn(async move { m.start_backend(&h).await }));
     }
 
     // Wait for all starts to complete
     for handle in handles {
         let result = handle.await.unwrap();
-        assert!(result.is_ok(), "Concurrent start failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Concurrent start failed: {:?}",
+            result.err()
+        );
     }
 
     // Wait for all to become ready
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
-        let all_ready = hostnames.iter().all(|h| manager.get_state(h) == BackendState::Ready);
+        let all_ready = hostnames
+            .iter()
+            .all(|h| manager.get_state(h) == BackendState::Ready);
         if all_ready {
             break;
         }
@@ -4464,8 +4999,7 @@ async fn test_docker_concurrent_starts() {
         assert_eq!(
             manager.get_state(hostname),
             BackendState::Ready,
-            "{} should be ready",
-            hostname
+            "{hostname} should be ready"
         );
     }
 
@@ -4493,7 +5027,7 @@ async fn test_hot_reload_add_backend() {
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Initially only has app-a
@@ -4505,7 +5039,10 @@ async fn test_hot_reload_add_backend() {
     new_configs.insert("app-a.local".to_string(), mock_backend_config(port_a));
     new_configs.insert("app-b.local".to_string(), mock_backend_config(port_b));
 
-    let result = manager.apply_config(new_configs, BackendDefaults::default()).await.unwrap();
+    let result = manager
+        .apply_config(new_configs, BackendDefaults::default())
+        .await
+        .unwrap();
 
     // Check reload result
     assert!(result.added.contains(&"app-b.local".to_string()));
@@ -4531,7 +5068,7 @@ async fn test_hot_reload_remove_backend() {
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start app-b
@@ -4551,7 +5088,10 @@ async fn test_hot_reload_remove_backend() {
     let mut new_configs = HashMap::new();
     new_configs.insert("app-a.local".to_string(), mock_backend_config(port_a));
 
-    let result = manager.apply_config(new_configs, BackendDefaults::default()).await.unwrap();
+    let result = manager
+        .apply_config(new_configs, BackendDefaults::default())
+        .await
+        .unwrap();
 
     // Check reload result
     assert!(result.removed.contains(&"app-b.local".to_string()));
@@ -4582,7 +5122,7 @@ async fn test_hot_reload_updates_defaults() {
     let manager = ProcessManager::new(
         configs.clone(),
         defaults,
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Check initial defaults
@@ -4616,19 +5156,29 @@ async fn test_hot_reload_running_backend_continues() {
     let manager = ProcessManager::new(
         configs,
         BackendDefaults::default(),
-        format!("http://127.0.0.1:{}", admin_port),
+        format!("http://127.0.0.1:{admin_port}"),
     );
 
     // Start admin server
-    let admin_addr: SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
-    let admin_server = AdminServer::new(admin_addr, Arc::clone(&manager), shutdown_rx.clone(), "test-token".to_string());
+    let admin_addr: SocketAddr = format!("127.0.0.1:{admin_port}").parse().unwrap();
+    let admin_server = AdminServer::new(
+        admin_addr,
+        Arc::clone(&manager),
+        shutdown_rx.clone(),
+        "test-token".to_string(),
+    );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_server.run().await;
     });
 
     // Start proxy
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
-    let proxy_server = ProxyServer::new(proxy_addr, Arc::clone(&manager), manager.shared_defaults(), shutdown_rx);
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}").parse().unwrap();
+    let proxy_server = ProxyServer::new(
+        proxy_addr,
+        Arc::clone(&manager),
+        manager.shared_defaults(),
+        shutdown_rx,
+    );
     let proxy_handle = tokio::spawn(async move {
         let _ = proxy_server.run().await;
     });
@@ -4637,20 +5187,33 @@ async fn test_hot_reload_running_backend_continues() {
     assert!(wait_for_port(proxy_port, Duration::from_secs(2)).await);
 
     // Make request to start backend
-    let response = http_get_with_host(proxy_port, "/echo", "app.local").await.unwrap();
-    assert!(response.contains("200 OK"), "Initial request failed: {}", response);
+    let response = http_get_with_host(proxy_port, "/echo", "app.local")
+        .await
+        .unwrap();
+    assert!(
+        response.contains("200 OK"),
+        "Initial request failed: {response}"
+    );
 
     // Hot reload with new backend added (existing backend config unchanged)
     let mut new_configs = HashMap::new();
     new_configs.insert("app.local".to_string(), mock_backend_config(port_a));
     new_configs.insert("new-app.local".to_string(), mock_backend_config(port_b));
 
-    let result = manager.apply_config(new_configs, BackendDefaults::default()).await.unwrap();
+    let result = manager
+        .apply_config(new_configs, BackendDefaults::default())
+        .await
+        .unwrap();
     assert!(result.added.contains(&"new-app.local".to_string()));
 
     // Original backend should still work
-    let response = http_get_with_host(proxy_port, "/echo", "app.local").await.unwrap();
-    assert!(response.contains("200 OK"), "Request after reload failed: {}", response);
+    let response = http_get_with_host(proxy_port, "/echo", "app.local")
+        .await
+        .unwrap();
+    assert!(
+        response.contains("200 OK"),
+        "Request after reload failed: {response}"
+    );
 
     // New backend should be routable (will start on first request)
     assert!(manager.has_backend("new-app.local"));

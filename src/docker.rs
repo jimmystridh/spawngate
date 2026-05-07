@@ -1,12 +1,12 @@
 //! Docker container management for Docker-based backends
 
 use crate::config::{BackendConfig, PullPolicy};
-use bollard::container::{
-    Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
-    StartContainerOptions, StopContainerOptions,
+use bollard::container::LogOutput;
+use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
+use bollard::query_parameters::{
+    CreateContainerOptions, CreateImageOptions, KillContainerOptions, LogsOptions,
+    RemoveContainerOptions, StartContainerOptions, StopContainerOptions,
 };
-use bollard::image::CreateImageOptions;
-use bollard::models::{HostConfig, PortBinding};
 use bollard::Docker;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -31,17 +31,15 @@ impl DockerManager {
         let client = if let Some(host) = docker_host {
             Self::connect_to_host(host).map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to connect to Docker at '{}': {}. \
-                     Ensure Docker is running and the socket path is correct.",
-                    host, e
+                    "Failed to connect to Docker at '{host}': {e}. \
+                     Ensure Docker is running and the socket path is correct."
                 )
             })?
         } else if let Ok(host) = std::env::var("DOCKER_HOST") {
             Self::connect_to_host(&host).map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to connect to Docker via DOCKER_HOST='{}': {}. \
-                     Ensure Docker is running and accessible.",
-                    host, e
+                    "Failed to connect to Docker via DOCKER_HOST='{host}': {e}. \
+                     Ensure Docker is running and accessible."
                 )
             })?
         } else {
@@ -51,9 +49,8 @@ impl DockerManager {
         // Verify connection
         client.ping().await.map_err(|e| {
             anyhow::anyhow!(
-                "Docker daemon is not responding: {}. \
-                 Ensure Docker Desktop, Colima, or dockerd is running.",
-                e
+                "Docker daemon is not responding: {e}. \
+                 Ensure Docker Desktop, Colima, or dockerd is running."
             )
         })?;
 
@@ -65,14 +62,13 @@ impl DockerManager {
         if host.starts_with("unix://") {
             let socket_path = host.trim_start_matches("unix://");
             Docker::connect_with_socket(socket_path, 120, bollard::API_DEFAULT_VERSION)
-                .map_err(|e| anyhow::anyhow!("Cannot connect to Unix socket '{}': {}", socket_path, e))
+                .map_err(|e| anyhow::anyhow!("Cannot connect to Unix socket '{socket_path}': {e}"))
         } else if host.starts_with("tcp://") || host.starts_with("http://") {
             Docker::connect_with_http(host, 120, bollard::API_DEFAULT_VERSION)
-                .map_err(|e| anyhow::anyhow!("Cannot connect to TCP endpoint '{}': {}", host, e))
+                .map_err(|e| anyhow::anyhow!("Cannot connect to TCP endpoint '{host}': {e}"))
         } else {
             anyhow::bail!(
-                "Invalid docker_host format: '{}'. Expected 'unix:///path/to/socket' or 'tcp://host:port'",
-                host
+                "Invalid docker_host format: '{host}'. Expected 'unix:///path/to/socket' or 'tcp://host:port'"
             )
         }
     }
@@ -84,10 +80,19 @@ impl DockerManager {
 
         let socket_paths: Vec<(&str, String)> = vec![
             ("Linux default", "/var/run/docker.sock".to_string()),
-            ("Docker Desktop (macOS)", format!("{}/.docker/run/docker.sock", home)),
-            ("Colima (macOS)", format!("{}/.colima/default/docker.sock", home)),
-            ("Rancher Desktop", format!("{}/.rd/docker.sock", home)),
-            ("Podman (Linux)", format!("{}/podman/podman.sock", xdg_runtime)),
+            (
+                "Docker Desktop (macOS)",
+                format!("{home}/.docker/run/docker.sock"),
+            ),
+            (
+                "Colima (macOS)",
+                format!("{home}/.colima/default/docker.sock"),
+            ),
+            ("Rancher Desktop", format!("{home}/.rd/docker.sock")),
+            (
+                "Podman (Linux)",
+                format!("{xdg_runtime}/podman/podman.sock"),
+            ),
         ];
 
         let mut tried_paths = Vec::new();
@@ -105,10 +110,12 @@ impl DockerManager {
                         if client.ping().await.is_ok() {
                             return Ok(client);
                         }
-                        tried_paths.push(format!("{} ({}) - socket exists but daemon not responding", path, name));
+                        tried_paths.push(format!(
+                            "{path} ({name}) - socket exists but daemon not responding"
+                        ));
                     }
                     Err(e) => {
-                        tried_paths.push(format!("{} ({}) - connection failed: {}", path, name, e));
+                        tried_paths.push(format!("{path} ({name}) - connection failed: {e}"));
                     }
                 }
             }
@@ -125,13 +132,12 @@ impl DockerManager {
                 };
 
                 anyhow::bail!(
-                    "Cannot connect to Docker daemon. {}\n\n\
+                    "Cannot connect to Docker daemon. {tried_info}\n\n\
                      To fix this:\n\
                      - Start Docker Desktop, Colima, or dockerd\n\
                      - Or set DOCKER_HOST environment variable\n\
                      - Or specify docker_host in the backend configuration\n\n\
-                     Underlying error: {}",
-                    tried_info, e
+                     Underlying error: {e}"
                 )
             }
         }
@@ -149,9 +155,8 @@ impl DockerManager {
                 // Check if image exists, fail if not
                 if self.client.inspect_image(image).await.is_err() {
                     anyhow::bail!(
-                        "Image '{}' not found locally and pull_policy is 'never'. \
-                         Pull the image manually with 'docker pull {}' or change pull_policy.",
-                        image, image
+                        "Image '{image}' not found locally and pull_policy is 'never'. \
+                         Pull the image manually with 'docker pull {image}' or change pull_policy."
                     );
                 }
                 false
@@ -171,7 +176,7 @@ impl DockerManager {
         if should_pull {
             info!(image, "Pulling Docker image");
             let options = CreateImageOptions {
-                from_image: image,
+                from_image: Some(image.to_string()),
                 ..Default::default()
             };
 
@@ -184,7 +189,7 @@ impl DockerManager {
                         if let Some(status) = info.status {
                             debug!(image, status, "Pull progress");
                         }
-                        if let Some(error) = info.error {
+                        if let Some(error) = info.error_detail.and_then(|detail| detail.message) {
                             last_error = Some(error);
                         }
                     }
@@ -193,31 +198,30 @@ impl DockerManager {
                         let err_str = e.to_string();
                         if err_str.contains("manifest unknown") || err_str.contains("not found") {
                             anyhow::bail!(
-                                "Image '{}' not found in registry. \
-                                 Check the image name and tag are correct.",
-                                image
+                                "Image '{image}' not found in registry. \
+                                 Check the image name and tag are correct."
                             );
-                        } else if err_str.contains("unauthorized") || err_str.contains("authentication") {
+                        } else if err_str.contains("unauthorized")
+                            || err_str.contains("authentication")
+                        {
                             anyhow::bail!(
-                                "Authentication required to pull '{}'. \
-                                 Run 'docker login' first or check your credentials.",
-                                image
+                                "Authentication required to pull '{image}'. \
+                                 Run 'docker login' first or check your credentials."
                             );
                         } else if err_str.contains("timeout") || err_str.contains("connection") {
                             anyhow::bail!(
-                                "Network error pulling '{}': {}. \
-                                 Check your internet connection and try again.",
-                                image, e
+                                "Network error pulling '{image}': {e}. \
+                                 Check your internet connection and try again."
                             );
                         } else {
-                            anyhow::bail!("Failed to pull image '{}': {}", image, e);
+                            anyhow::bail!("Failed to pull image '{image}': {e}");
                         }
                     }
                 }
             }
 
             if let Some(error) = last_error {
-                anyhow::bail!("Failed to pull image '{}': {}", image, error);
+                anyhow::bail!("Failed to pull image '{image}': {error}");
             }
 
             info!(image, "Image pulled successfully");
@@ -233,12 +237,14 @@ impl DockerManager {
         hostname: &str,
         admin_url: &str,
     ) -> anyhow::Result<String> {
-        let image = config.image.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Docker backend requires 'image' field")
-        })?;
+        let image = config
+            .image
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Docker backend requires 'image' field"))?;
 
         // Pull image if needed
-        self.pull_image_if_needed(image, &config.pull_policy).await?;
+        self.pull_image_if_needed(image, &config.pull_policy)
+            .await?;
 
         // Generate container name
         let container_name = config
@@ -250,15 +256,10 @@ impl DockerManager {
         let _ = self.remove_container(&container_name).await;
 
         // Build environment variables
-        let mut env: Vec<String> = config
-            .env
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect();
+        let mut env: Vec<String> = config.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         env.push(format!("PORT={}", config.port));
         env.push(format!(
-            "SERVERLESS_PROXY_READY_URL={}/ready/{}",
-            admin_url, hostname
+            "SERVERLESS_PROXY_READY_URL={admin_url}/ready/{hostname}"
         ));
 
         // Build port bindings
@@ -273,8 +274,7 @@ impl DockerManager {
         );
 
         // Build exposed ports
-        let mut exposed_ports: HashMap<String, HashMap<(), ()>> = HashMap::new();
-        exposed_ports.insert(port_key, HashMap::new());
+        let exposed_ports = vec![port_key];
 
         // Build host config
         let mut host_config = HostConfig {
@@ -288,9 +288,9 @@ impl DockerManager {
             host_config.memory = Some(parse_memory_limit(memory)?);
         }
         if let Some(ref cpus) = config.cpus {
-            let cpu_count: f64 = cpus.parse().map_err(|_| {
-                anyhow::anyhow!("Invalid CPU limit: {}", cpus)
-            })?;
+            let cpu_count: f64 = cpus
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid CPU limit: {cpus}"))?;
             // NanoCPUs is CPUs * 1e9
             host_config.nano_cpus = Some((cpu_count * 1_000_000_000.0) as i64);
         }
@@ -303,7 +303,7 @@ impl DockerManager {
         };
 
         // Create container config
-        let container_config = Config {
+        let container_config = ContainerCreateBody {
             image: Some(image.to_string()),
             cmd,
             env: Some(env),
@@ -314,8 +314,8 @@ impl DockerManager {
 
         // Create container
         let create_options = CreateContainerOptions {
-            name: container_name.clone(),
-            platform: None,
+            name: Some(container_name.clone()),
+            ..Default::default()
         };
 
         let response = self
@@ -332,15 +332,13 @@ impl DockerManager {
                     )
                 } else if err_str.contains("Conflict") && err_str.contains("name") {
                     anyhow::anyhow!(
-                        "Container name '{}' already exists. \
+                        "Container name '{container_name}' already exists. \
                          This shouldn't happen as we remove existing containers. \
-                         Try: docker rm -f {}",
-                        container_name, container_name
+                         Try: docker rm -f {container_name}"
                     )
                 } else {
                     anyhow::anyhow!(
-                        "Failed to create container '{}' from image '{}': {}",
-                        container_name, image, e
+                        "Failed to create container '{container_name}' from image '{image}': {e}"
                     )
                 }
             })?;
@@ -348,15 +346,12 @@ impl DockerManager {
         let container_id = response.id;
         info!(
             hostname,
-            container_id,
-            container_name,
-            image,
-            "Created Docker container"
+            container_id, container_name, image, "Created Docker container"
         );
 
         // Start container
         self.client
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
+            .start_container(&container_id, None::<StartContainerOptions>)
             .await
             .map_err(|e| {
                 let err_str = e.to_string();
@@ -368,20 +363,17 @@ impl DockerManager {
                     )
                 } else if err_str.contains("OCI runtime") || err_str.contains("executable file not found") {
                     anyhow::anyhow!(
-                        "Container failed to start: the image '{}' may have an invalid entrypoint or command. \
-                         Error: {}",
-                        image, e
+                        "Container failed to start: the image '{image}' may have an invalid entrypoint or command. \
+                         Error: {e}"
                     )
                 } else if err_str.contains("no such file") || err_str.contains("not found") {
                     anyhow::anyhow!(
-                        "Container failed to start: command or entrypoint not found in image '{}'. \
-                         Check that the image is built correctly. Error: {}",
-                        image, e
+                        "Container failed to start: command or entrypoint not found in image '{image}'. \
+                         Check that the image is built correctly. Error: {e}"
                     )
                 } else {
                     anyhow::anyhow!(
-                        "Failed to start container '{}' (id: {}): {}",
-                        container_name, container_id, e
+                        "Failed to start container '{container_name}' (id: {container_id}): {e}"
                     )
                 }
             })?;
@@ -398,10 +390,15 @@ impl DockerManager {
         timeout: Duration,
     ) -> anyhow::Result<()> {
         let options = StopContainerOptions {
-            t: timeout.as_secs() as i64,
+            t: Some(timeout.as_secs() as i32),
+            ..Default::default()
         };
 
-        match self.client.stop_container(container_id, Some(options)).await {
+        match self
+            .client
+            .stop_container(container_id, Some(options))
+            .await
+        {
             Ok(_) => {
                 info!(container_id, "Stopped Docker container");
                 Ok(())
@@ -420,13 +417,17 @@ impl DockerManager {
                 debug!(container_id, "Container not found");
                 Ok(())
             }
-            Err(e) => Err(anyhow::anyhow!("Failed to stop container: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to stop container: {e}")),
         }
     }
 
     /// Force kill a container
     pub async fn kill_container(&self, container_id: &str) -> anyhow::Result<()> {
-        match self.client.kill_container::<String>(container_id, None).await {
+        match self
+            .client
+            .kill_container(container_id, None::<KillContainerOptions>)
+            .await
+        {
             Ok(_) => {
                 info!(container_id, "Killed Docker container");
                 Ok(())
@@ -444,7 +445,7 @@ impl DockerManager {
                 debug!(container_id, "Container not running");
                 Ok(())
             }
-            Err(e) => Err(anyhow::anyhow!("Failed to kill container: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to kill container: {e}")),
         }
     }
 
@@ -455,7 +456,11 @@ impl DockerManager {
             ..Default::default()
         };
 
-        match self.client.remove_container(container_id, Some(options)).await {
+        match self
+            .client
+            .remove_container(container_id, Some(options))
+            .await
+        {
             Ok(_) => {
                 debug!(container_id, "Removed Docker container");
                 Ok(())
@@ -476,10 +481,7 @@ impl DockerManager {
     /// Check if a container is running
     pub async fn is_running(&self, container_id: &str) -> bool {
         match self.client.inspect_container(container_id, None).await {
-            Ok(info) => info
-                .state
-                .and_then(|s| s.running)
-                .unwrap_or(false),
+            Ok(info) => info.state.and_then(|s| s.running).unwrap_or(false),
             Err(_) => false,
         }
     }
@@ -489,16 +491,12 @@ impl DockerManager {
     /// Returns a shutdown sender that can be used to stop log streaming.
     /// The spawned task will exit when the sender is dropped or when
     /// a shutdown signal is received.
-    pub fn stream_logs(
-        &self,
-        container_id: String,
-        hostname: String,
-    ) -> watch::Sender<bool> {
+    pub fn stream_logs(&self, container_id: String, hostname: String) -> watch::Sender<bool> {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let client = self.client.clone();
 
         tokio::spawn(async move {
-            let options = LogsOptions::<String> {
+            let options = LogsOptions {
                 follow: true,
                 stdout: true,
                 stderr: true,
@@ -602,9 +600,9 @@ fn parse_memory_limit(limit: &str) -> anyhow::Result<i64> {
         (limit.as_str(), 1i64)
     };
 
-    let num: f64 = num_str.parse().map_err(|_| {
-        anyhow::anyhow!("Invalid memory limit: {}", limit)
-    })?;
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid memory limit: {limit}"))?;
 
     Ok((num * multiplier as f64) as i64)
 }

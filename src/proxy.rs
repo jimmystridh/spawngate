@@ -110,7 +110,11 @@ impl ProxyServer {
 
     pub async fn run(self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.bind_addr).await?;
-        let protocol = if self.tls_acceptor.is_some() { "HTTPS" } else { "HTTP" };
+        let protocol = if self.tls_acceptor.is_some() {
+            "HTTPS"
+        } else {
+            "HTTP"
+        };
         info!(addr = %self.bind_addr, protocol, "Proxy server listening (HTTP/1.1 and HTTP/2)");
 
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -186,7 +190,19 @@ where
         let pool = Arc::clone(&pool);
         let client_addr = addr;
         let acme = acme_challenges.clone();
-        async move { handle_request(req, pm, defs, pool, client_addr, is_tls, https_redirect_port, acme).await }
+        async move {
+            handle_request(
+                req,
+                pm,
+                defs,
+                pool,
+                client_addr,
+                is_tls,
+                https_redirect_port,
+                acme,
+            )
+            .await
+        }
     });
 
     // Use auto::Builder to support both HTTP/1.1 and HTTP/2
@@ -199,7 +215,7 @@ where
         .max_concurrent_streams(250)
         .serve_connection_with_upgrades(io, service)
         .await
-        .map_err(|e| anyhow::anyhow!("Connection error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Connection error: {e}"))?;
 
     Ok(())
 }
@@ -224,7 +240,11 @@ async fn handle_request(
                 return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header(hyper::header::CONTENT_TYPE, "text/plain")
-                    .body(Full::new(Bytes::from(key_auth)).map_err(|never| match never {}).boxed())
+                    .body(
+                        Full::new(Bytes::from(key_auth))
+                            .map_err(|never| match never {})
+                            .boxed(),
+                    )
                     .expect("valid response builder"));
             }
         }
@@ -404,7 +424,10 @@ fn extract_hostname(req: &Request<Incoming>) -> Option<String> {
 
             // Validate characters: alphanumeric, hyphen, and dot only
             // This prevents log injection and other attacks
-            if !hostname.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
+            if !hostname
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+            {
                 return None;
             }
 
@@ -413,7 +436,10 @@ fn extract_hostname(req: &Request<Incoming>) -> Option<String> {
 }
 
 /// Build an HTTPS redirect response (301 Moved Permanently)
-fn build_https_redirect(req: &Request<Incoming>, https_port: u16) -> Response<BoxBody<Bytes, hyper::Error>> {
+fn build_https_redirect(
+    req: &Request<Incoming>,
+    https_port: u16,
+) -> Response<BoxBody<Bytes, hyper::Error>> {
     let host = req
         .headers()
         .get(hyper::header::HOST)
@@ -421,12 +447,16 @@ fn build_https_redirect(req: &Request<Incoming>, https_port: u16) -> Response<Bo
         .map(|h| h.split(':').next().unwrap_or(h))
         .unwrap_or("localhost");
 
-    let path = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
 
     let location = if https_port == 443 {
-        format!("https://{}{}", host, path)
+        format!("https://{host}{path}")
     } else {
-        format!("https://{}:{}{}", host, https_port, path)
+        format!("https://{host}:{https_port}{path}")
     };
 
     Response::builder()
@@ -579,22 +609,22 @@ async fn forward_bidirectional(
 
 /// Build the raw HTTP upgrade request to send to the backend
 fn build_upgrade_request(req: &Request<Incoming>, port: u16) -> Vec<u8> {
-    let path = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let mut request = format!(
-        "{} {} HTTP/1.1\r\n",
-        req.method(),
-        path
-    );
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let mut request = format!("{} {} HTTP/1.1\r\n", req.method(), path);
 
     // Forward all headers
     for (name, value) in req.headers() {
         if let Ok(v) = value.to_str() {
-            request.push_str(&format!("{}: {}\r\n", name, v));
+            request.push_str(&format!("{name}: {v}\r\n"));
         }
     }
 
     // Update Host header to point to backend
-    request.push_str(&format!("Host: 127.0.0.1:{}\r\n", port));
+    request.push_str(&format!("Host: 127.0.0.1:{port}\r\n"));
     request.push_str("\r\n");
 
     request.into_bytes()
@@ -638,20 +668,23 @@ async fn handle_upgrade(
     request_id: String,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     let upgrade_type = get_upgrade_type(&req).unwrap_or_else(|| "unknown".to_string());
-    debug!(hostname, request_id, upgrade_type, "Handling upgrade request");
+    debug!(
+        hostname,
+        request_id, upgrade_type, "Handling upgrade request"
+    );
 
     // Build the raw HTTP request to send to the backend
     let raw_request = build_upgrade_request(&req, port);
 
     // Connect to the backend
-    let backend_addr = format!("127.0.0.1:{}", port);
+    let backend_addr = format!("127.0.0.1:{port}");
     let mut backend_stream = match TcpStream::connect(&backend_addr).await {
         Ok(stream) => stream,
         Err(e) => {
             error!(hostname, port, error = %e, "Failed to connect to backend for upgrade");
             return Ok(json_error_response(
                 ProxyErrorCode::ConnectionFailed,
-                format!("Failed to connect to backend: {}", e),
+                format!("Failed to connect to backend: {e}"),
             ));
         }
     };
@@ -661,7 +694,7 @@ async fn handle_upgrade(
         error!(hostname, error = %e, "Failed to send upgrade request to backend");
         return Ok(json_error_response(
             ProxyErrorCode::ConnectionFailed,
-            format!("Failed to send upgrade request: {}", e),
+            format!("Failed to send upgrade request: {e}"),
         ));
     }
 
@@ -670,7 +703,10 @@ async fn handle_upgrade(
     let n = match backend_stream.read(&mut response_buf).await {
         Ok(n) if n > 0 => n,
         Ok(_) => {
-            error!(hostname, "Backend closed connection before responding to upgrade");
+            error!(
+                hostname,
+                "Backend closed connection before responding to upgrade"
+            );
             return Ok(json_error_response(
                 ProxyErrorCode::ConnectionFailed,
                 "Backend closed connection",
@@ -680,7 +716,7 @@ async fn handle_upgrade(
             error!(hostname, error = %e, "Failed to read upgrade response from backend");
             return Ok(json_error_response(
                 ProxyErrorCode::ConnectionFailed,
-                format!("Failed to read backend response: {}", e),
+                format!("Failed to read backend response: {e}"),
             ));
         }
     };
@@ -708,11 +744,18 @@ async fn handle_upgrade(
             }
         }
         return Ok(response
-            .body(Empty::<Bytes>::new().map_err(|never| match never {}).boxed())
+            .body(
+                Empty::<Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
             .expect("valid response builder"));
     }
 
-    info!(hostname, request_id, upgrade_type, "WebSocket upgrade successful");
+    info!(
+        hostname,
+        request_id, upgrade_type, "WebSocket upgrade successful"
+    );
 
     // Track the WebSocket connection as in-flight - atomically verifies backend is Ready
     if !process_manager.increment_in_flight(&hostname) {
@@ -736,7 +779,11 @@ async fn handle_upgrade(
     }
 
     let response = response
-        .body(Empty::<Bytes>::new().map_err(|never| match never {}).boxed())
+        .body(
+            Empty::<Bytes>::new()
+                .map_err(|never| match never {})
+                .boxed(),
+        )
         .expect("valid response builder");
 
     // Spawn the bidirectional forwarding task
@@ -747,8 +794,13 @@ async fn handle_upgrade(
         // Wait for the client upgrade to complete
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                debug!(hostname = hostname_clone, request_id = request_id_clone, "Client upgrade complete, starting forwarding");
-                forward_bidirectional(upgraded, backend_stream, &hostname_clone, &request_id_clone).await;
+                debug!(
+                    hostname = hostname_clone,
+                    request_id = request_id_clone,
+                    "Client upgrade complete, starting forwarding"
+                );
+                forward_bidirectional(upgraded, backend_stream, &hostname_clone, &request_id_clone)
+                    .await;
             }
             Err(e) => {
                 error!(hostname = hostname_clone, error = %e, "Failed to upgrade client connection");
@@ -756,7 +808,11 @@ async fn handle_upgrade(
         }
         // Decrement in-flight when done
         pm.decrement_in_flight(&hostname_clone);
-        debug!(hostname = hostname_clone, request_id = request_id_clone, "WebSocket connection closed");
+        debug!(
+            hostname = hostname_clone,
+            request_id = request_id_clone,
+            "WebSocket connection closed"
+        );
     });
 
     Ok(response)
