@@ -3948,7 +3948,7 @@ async fn docker_available() -> bool {
     match DockerManager::new(None).await {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("Docker not available: {}", e);
+            eprintln!("Docker not available: {e}");
             false
         }
     }

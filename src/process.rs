@@ -35,7 +35,7 @@ pub enum BackendState {
 /// Handle to a running backend (local process or Docker container)
 pub enum ProcessHandle {
     /// Local process spawned directly
-    Local(Child),
+    Local(Box<Child>),
     /// Docker container
     Docker {
         container_id: String,
@@ -365,7 +365,7 @@ impl ProcessManager {
         let pid = child.id().unwrap_or(0);
         info!(hostname, pid, "Backend process spawned");
 
-        Ok(ProcessHandle::Local(child))
+        Ok(ProcessHandle::Local(Box::new(child)))
     }
 
     /// Start a Docker container backend
