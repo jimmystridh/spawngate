@@ -427,7 +427,7 @@ impl PidFile {
         let pid = std::process::id();
         let mut file = std::fs::File::create(path)?;
         use std::io::Write;
-        writeln!(file, "{}", pid)?;
+        writeln!(file, "{pid}")?;
         Ok(Self)
     }
 }

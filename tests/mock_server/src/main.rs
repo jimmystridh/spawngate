@@ -41,38 +41,35 @@ async fn main() {
 
     // Simulate startup delay
     if startup_delay > 0 {
-        eprintln!(
-            "Mock server: sleeping for {}ms before starting",
-            startup_delay
-        );
+        eprintln!("Mock server: sleeping for {startup_delay}ms before starting");
         tokio::time::sleep(Duration::from_millis(startup_delay)).await;
     }
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .expect("Failed to bind");
 
-    eprintln!("Mock server: listening on port {}", port);
+    eprintln!("Mock server: listening on port {port}");
 
     // Send ready callback if URL provided
     if let Some(url) = ready_url {
-        eprintln!("Mock server: sending ready callback to {}", url);
+        eprintln!("Mock server: sending ready callback to {url}");
         // Simple HTTP POST without external dependencies
         if let Err(e) = send_ready_callback(&url).await {
-            eprintln!("Mock server: failed to send ready callback: {}", e);
+            eprintln!("Mock server: failed to send ready callback: {e}");
         }
     }
 
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                eprintln!("Mock server: connection from {}", addr);
+                eprintln!("Mock server: connection from {addr}");
                 tokio::spawn(async move {
                     handle_connection(stream).await;
                 });
             }
             Err(e) => {
-                eprintln!("Mock server: accept error: {}", e);
+                eprintln!("Mock server: accept error: {e}");
             }
         }
     }
@@ -118,7 +115,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream) {
         ("GET", "/")
     };
 
-    eprintln!("Mock server: {} {}", method, path);
+    eprintln!("Mock server: {method} {path}");
 
     // Collect headers
     let headers: Vec<&str> = lines.take_while(|l| !l.is_empty()).collect();
@@ -145,9 +142,8 @@ async fn handle_connection(mut stream: tokio::net::TcpStream) {
                 "HTTP/1.1 101 Switching Protocols\r\n\
                  Upgrade: websocket\r\n\
                  Connection: Upgrade\r\n\
-                 Sec-WebSocket-Accept: {}\r\n\
-                 \r\n",
-                accept_key
+                 Sec-WebSocket-Accept: {accept_key}\r\n\
+                 \r\n"
             );
             if stream.write_all(response.as_bytes()).await.is_err() {
                 return;
@@ -222,17 +218,16 @@ async fn send_ready_callback(url: &str) -> Result<(), Box<dyn std::error::Error>
     // Parse URL to get host and port
     let url = url.strip_prefix("http://").unwrap_or(url);
     let (host_port, path) = url.split_once('/').unwrap_or((url, ""));
-    let path = format!("/{}", path);
+    let path = format!("/{path}");
 
     let mut stream = tokio::net::TcpStream::connect(host_port).await?;
 
     let request = format!(
-        "POST {} HTTP/1.1\r\n\
-         Host: {}\r\n\
+        "POST {path} HTTP/1.1\r\n\
+         Host: {host_port}\r\n\
          Content-Length: 0\r\n\
          Connection: close\r\n\
-         \r\n",
-        path, host_port
+         \r\n"
     );
 
     stream.write_all(request.as_bytes()).await?;
@@ -302,16 +297,13 @@ async fn handle_websocket(mut stream: tokio::net::TcpStream) {
             }
         }
 
-        eprintln!(
-            "Mock server: WebSocket frame opcode={} fin={} len={}",
-            opcode, fin, payload_len
-        );
+        eprintln!("Mock server: WebSocket frame opcode={opcode} fin={fin} len={payload_len}");
 
         match opcode {
             0x1 => {
                 // Text frame - echo back
                 let text = String::from_utf8_lossy(&payload);
-                eprintln!("Mock server: WebSocket received text: {}", text);
+                eprintln!("Mock server: WebSocket received text: {text}");
 
                 // Send back (unmasked - server to client)
                 let mut response = Vec::new();
@@ -358,7 +350,7 @@ async fn handle_websocket(mut stream: tokio::net::TcpStream) {
                 // Pong - ignore
             }
             _ => {
-                eprintln!("Mock server: Unknown WebSocket opcode: {}", opcode);
+                eprintln!("Mock server: Unknown WebSocket opcode: {opcode}");
             }
         }
     }
