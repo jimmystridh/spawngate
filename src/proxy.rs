@@ -215,7 +215,7 @@ where
         .max_concurrent_streams(250)
         .serve_connection_with_upgrades(io, service)
         .await
-        .map_err(|e| anyhow::anyhow!("Connection error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Connection error: {e}"))?;
 
     Ok(())
 }
@@ -454,9 +454,9 @@ fn build_https_redirect(
         .unwrap_or("/");
 
     let location = if https_port == 443 {
-        format!("https://{}{}", host, path)
+        format!("https://{host}{path}")
     } else {
-        format!("https://{}:{}{}", host, https_port, path)
+        format!("https://{host}:{https_port}{path}")
     };
 
     Response::builder()
@@ -619,12 +619,12 @@ fn build_upgrade_request(req: &Request<Incoming>, port: u16) -> Vec<u8> {
     // Forward all headers
     for (name, value) in req.headers() {
         if let Ok(v) = value.to_str() {
-            request.push_str(&format!("{}: {}\r\n", name, v));
+            request.push_str(&format!("{name}: {v}\r\n"));
         }
     }
 
     // Update Host header to point to backend
-    request.push_str(&format!("Host: 127.0.0.1:{}\r\n", port));
+    request.push_str(&format!("Host: 127.0.0.1:{port}\r\n"));
     request.push_str("\r\n");
 
     request.into_bytes()
@@ -677,14 +677,14 @@ async fn handle_upgrade(
     let raw_request = build_upgrade_request(&req, port);
 
     // Connect to the backend
-    let backend_addr = format!("127.0.0.1:{}", port);
+    let backend_addr = format!("127.0.0.1:{port}");
     let mut backend_stream = match TcpStream::connect(&backend_addr).await {
         Ok(stream) => stream,
         Err(e) => {
             error!(hostname, port, error = %e, "Failed to connect to backend for upgrade");
             return Ok(json_error_response(
                 ProxyErrorCode::ConnectionFailed,
-                format!("Failed to connect to backend: {}", e),
+                format!("Failed to connect to backend: {e}"),
             ));
         }
     };
@@ -694,7 +694,7 @@ async fn handle_upgrade(
         error!(hostname, error = %e, "Failed to send upgrade request to backend");
         return Ok(json_error_response(
             ProxyErrorCode::ConnectionFailed,
-            format!("Failed to send upgrade request: {}", e),
+            format!("Failed to send upgrade request: {e}"),
         ));
     }
 
@@ -716,7 +716,7 @@ async fn handle_upgrade(
             error!(hostname, error = %e, "Failed to read upgrade response from backend");
             return Ok(json_error_response(
                 ProxyErrorCode::ConnectionFailed,
-                format!("Failed to read backend response: {}", e),
+                format!("Failed to read backend response: {e}"),
             ));
         }
     };

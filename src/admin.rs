@@ -149,7 +149,7 @@ where
     AutoBuilder::new(TokioExecutor::new())
         .serve_connection(io, service)
         .await
-        .map_err(|e| anyhow::anyhow!("Admin connection error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Admin connection error: {e}"))?;
 
     Ok(())
 }

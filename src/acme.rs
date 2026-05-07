@@ -199,7 +199,7 @@ impl AcmeManager {
             .as_deref()
             .unwrap_or(LetsEncrypt::Production.url());
 
-        let contact = format!("mailto:{}", email);
+        let contact = format!("mailto:{email}");
         let contacts = [contact.as_str()];
         let (account, credentials) = Account::builder()?
             .create(
@@ -448,7 +448,7 @@ impl AcmeManager {
                 .collect();
 
         let key = PrivateKeyDer::try_from(private_key.serialize_der())
-            .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse private key: {e}"))?;
 
         info!(domains = ?self.config.domains, "Certificate obtained successfully");
 
@@ -462,7 +462,7 @@ impl AcmeManager {
         key: PrivateKeyDer<'static>,
     ) -> anyhow::Result<()> {
         let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
-            .map_err(|e| anyhow::anyhow!("Failed to create signing key: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create signing key: {e}"))?;
 
         let certified_key = Arc::new(CertifiedKey::new(certs.clone(), signing_key));
 
@@ -575,10 +575,10 @@ fn create_tls_alpn01_cert(domain: &str, digest: &[u8]) -> anyhow::Result<Arc<Cer
 
     let cert_der = CertificateDer::from(cert.der().to_vec());
     let key_der = PrivateKeyDer::try_from(key_pair.serialize_der())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {e}"))?;
 
     let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)
-        .map_err(|e| anyhow::anyhow!("Failed to create signing key: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create signing key: {e}"))?;
 
     Ok(Arc::new(CertifiedKey::new(vec![cert_der], signing_key)))
 }
@@ -658,16 +658,12 @@ fn validate_cache_dir(path: &str) -> anyhow::Result<PathBuf> {
     // If path exists, canonicalize it to resolve symlinks
     if path_buf.exists() {
         let canonical = path_buf.canonicalize().map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to canonicalize ACME cache directory '{}': {}",
-                path,
-                e
-            )
+            anyhow::anyhow!("Failed to canonicalize ACME cache directory '{path}': {e}")
         })?;
 
         // Verify it's a directory
         if !canonical.is_dir() {
-            anyhow::bail!("ACME cache path '{}' exists but is not a directory", path);
+            anyhow::bail!("ACME cache path '{path}' exists but is not a directory");
         }
 
         return Ok(canonical);
@@ -683,7 +679,7 @@ fn validate_cache_dir(path: &str) -> anyhow::Result<PathBuf> {
         if parent.exists() {
             let canonical_parent = parent
                 .canonicalize()
-                .map_err(|e| anyhow::anyhow!("Failed to canonicalize parent directory: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to canonicalize parent directory: {e}"))?;
 
             // Rebuild path with canonical parent
             if let Some(file_name) = path_buf.file_name() {

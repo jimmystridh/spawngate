@@ -26,8 +26,8 @@ pub enum PoolError {
 impl std::fmt::Display for PoolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PoolError::Client(e) => write!(f, "Client error: {}", e),
-            PoolError::RequestBuild(s) => write!(f, "Request build error: {}", s),
+            PoolError::Client(e) => write!(f, "Client error: {e}"),
+            PoolError::RequestBuild(s) => write!(f, "Request build error: {s}"),
         }
     }
 }
@@ -185,7 +185,7 @@ impl ConnectionPool {
     /// Check if a backend is reachable (useful for health checks)
     /// Uses the dedicated health check client for connection reuse
     pub async fn check_backend(&self, port: u16, path: &str) -> bool {
-        let uri = format!("http://127.0.0.1:{}{}", port, path);
+        let uri = format!("http://127.0.0.1:{port}{path}");
 
         let req = match Request::builder()
             .method("GET")

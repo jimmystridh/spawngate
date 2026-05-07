@@ -278,7 +278,7 @@ impl ProcessManager {
     pub async fn start_backend(self: &Arc<Self>, hostname: &str) -> anyhow::Result<()> {
         let config = self
             .get_config(hostname)
-            .ok_or_else(|| anyhow::anyhow!("Unknown backend: {}", hostname))?;
+            .ok_or_else(|| anyhow::anyhow!("Unknown backend: {hostname}"))?;
 
         // Check if already running or starting
         if let Some(process) = self.processes.get(hostname) {
@@ -384,17 +384,14 @@ impl ProcessManager {
         let docker = self
             .get_docker(config.docker_host.as_deref())
             .await
-            .map_err(|e| anyhow::anyhow!("Cannot start Docker backend '{}': {}", hostname, e))?;
+            .map_err(|e| anyhow::anyhow!("Cannot start Docker backend '{hostname}': {e}"))?;
 
         let container_id = docker
             .start_container(config, hostname, &self.admin_url)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to start Docker container for backend '{}' (image: {}): {}",
-                    hostname,
-                    image,
-                    e
+                    "Failed to start Docker container for backend '{hostname}' (image: {image}): {e}"
                 )
             })?;
 
@@ -539,7 +536,7 @@ impl ProcessManager {
         let url_without_scheme = url.strip_prefix("http://").unwrap_or(url);
         let (host_port, path) = url_without_scheme
             .split_once('/')
-            .map(|(h, p)| (h, format!("/{}", p)))
+            .map(|(h, p)| (h, format!("/{p}")))
             .unwrap_or((url_without_scheme, "/".to_string()));
 
         // Connect with a short timeout
@@ -555,10 +552,8 @@ impl ProcessManager {
         };
 
         // Send HTTP GET request
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, host_port
-        );
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
 
         if stream.write_all(request.as_bytes()).await.is_err() {
             return Ok(false);

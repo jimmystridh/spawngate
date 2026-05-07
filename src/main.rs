@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
         let tls_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
-            .map_err(|e| anyhow::anyhow!("TLS configuration error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("TLS configuration error: {e}"))?;
 
         (
             Some(TlsAcceptor::from(Arc::new(tls_config))),
@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
             .parse()
             .map_err(|e| {
                 error!(bind = %config.server.bind, port = http_port, error = %e, "Invalid HTTP bind address");
-                anyhow::anyhow!("Invalid HTTP bind address: {}", e)
+                anyhow::anyhow!("Invalid HTTP bind address: {e}")
             })?;
 
         let mut http_proxy = ProxyServer::with_pool_config(
@@ -198,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
             .parse()
             .map_err(|e| {
                 error!(bind = %config.server.bind, port = https_port, error = %e, "Invalid HTTPS bind address");
-                anyhow::anyhow!("Invalid HTTPS bind address: {}", e)
+                anyhow::anyhow!("Invalid HTTPS bind address: {e}")
             })?;
 
         let https_proxy = ProxyServer::with_pool_config(
@@ -241,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| {
             error!(admin_port = config.server.admin_port, error = %e, "Invalid admin bind address");
-            anyhow::anyhow!("Invalid admin bind address: {}", e)
+            anyhow::anyhow!("Invalid admin bind address: {e}")
         })?;
 
     // Generate or use configured admin token
@@ -411,7 +411,7 @@ impl PidFile {
         // Write PID
         let pid = std::process::id();
         use std::io::Write;
-        writeln!(&file, "{}", pid)?;
+        writeln!(&file, "{pid}")?;
 
         // Keep the file handle open to maintain the lock
         Ok(Self { _file: file })
@@ -481,14 +481,14 @@ fn print_startup_banner(config: &Config) {
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     let file = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to open certificate file {}: {}", path, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to open certificate file {path}: {e}"))?;
     let mut reader = BufReader::new(file);
     let certs = rustls_pemfile::certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse certificates from {}: {}", path, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse certificates from {path}: {e}"))?;
 
     if certs.is_empty() {
-        anyhow::bail!("No certificates found in {}", path);
+        anyhow::bail!("No certificates found in {path}");
     }
 
     Ok(certs)
@@ -496,12 +496,12 @@ fn load_certs(path: &str) -> anyhow::Result<Vec<CertificateDer<'static>>> {
 
 fn load_key(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
     let file =
-        File::open(path).map_err(|e| anyhow::anyhow!("Failed to open key file {}: {}", path, e))?;
+        File::open(path).map_err(|e| anyhow::anyhow!("Failed to open key file {path}: {e}"))?;
     let mut reader = BufReader::new(file);
 
     loop {
         match rustls_pemfile::read_one(&mut reader)
-            .map_err(|e| anyhow::anyhow!("Failed to parse key from {}: {}", path, e))?
+            .map_err(|e| anyhow::anyhow!("Failed to parse key from {path}: {e}"))?
         {
             Some(rustls_pemfile::Item::Pkcs1Key(key)) => return Ok(key.into()),
             Some(rustls_pemfile::Item::Pkcs8Key(key)) => return Ok(key.into()),
@@ -511,7 +511,7 @@ fn load_key(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
         }
     }
 
-    anyhow::bail!("No private key found in {}", path)
+    anyhow::bail!("No private key found in {path}")
 }
 
 fn generate_self_signed_cert(
@@ -519,11 +519,11 @@ fn generate_self_signed_cert(
     let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
 
     let CertifiedKey { cert, signing_key } = generate_simple_self_signed(subject_alt_names)
-        .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {e}"))?;
 
     let cert_der = CertificateDer::from(cert.der().to_vec());
     let key_der = PrivateKeyDer::try_from(signing_key.serialize_der())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize private key: {e}"))?;
 
     Ok((vec![cert_der], key_der))
 }

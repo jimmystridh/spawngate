@@ -479,16 +479,14 @@ impl BackendConfig {
             BackendType::Local => {
                 if self.command.is_none() {
                     return Err(format!(
-                        "Backend '{}': local backend requires 'command' field",
-                        hostname
+                        "Backend '{hostname}': local backend requires 'command' field"
                     ));
                 }
             }
             BackendType::Docker => {
                 if self.image.is_none() {
                     return Err(format!(
-                        "Backend '{}': Docker backend requires 'image' field",
-                        hostname
+                        "Backend '{hostname}': Docker backend requires 'image' field"
                     ));
                 }
             }
@@ -496,8 +494,7 @@ impl BackendConfig {
 
         if self.port == 0 {
             return Err(format!(
-                "Backend '{}': 'port' must be greater than 0",
-                hostname
+                "Backend '{hostname}': 'port' must be greater than 0"
             ));
         }
 
